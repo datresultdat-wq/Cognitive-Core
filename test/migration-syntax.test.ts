@@ -82,8 +82,11 @@ describe('migration files are structurally runnable', () => {
         // which is how plpgsql is normally formatted and how the lockdown
         // guard is written.
         const opens = (sql.match(/\bDO\s+(?:\$[A-Za-z_][A-Za-z_0-9]*\$|\$\$)/gi) || []).length;
-        const closes = (sql.match(/\bEND\s*(?:\$[A-Za-z_][A-Za-z_0-9]*\$|\$\$)\s*;/gi) || []).length;
-        expect(closes, `${opens} DO blocks but ${closes} END-with-delimiter terminators`).toBe(opens);
+        // Inspect DO bodies independently: function bodies also end in END,
+        // and a legal semicolon before the dollar tag must not be rejected.
+        const blocks = [...sql.matchAll(/\bDO\s+(\$[A-Za-z_][A-Za-z_0-9]*\$|\$\$)([\s\S]*?)\1\s*;/gi)];
+        expect(blocks.length, `${opens} DO blocks but ${blocks.length} matching bodies`).toBe(opens);
+        for (const block of blocks) expect(block[2].trim()).toMatch(/\bEND\s*;?$/i);
       });
     });
   }
