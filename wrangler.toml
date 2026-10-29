@@ -10,7 +10,7 @@ binding = "AI"
 enabled = true
 
 [[durable_objects.bindings]]
-name = "COGNITIVE_CORE"
+name = "yuna-cogcor-v2"
 class_name = "CognitiveCore"
 
 [[migrations]]
