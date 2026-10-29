@@ -196,7 +196,7 @@ async function writeUsageLog(env: Env, row: Record<string, unknown>): Promise<bo
     async () => {
       const res = await fetchWithTimeout(`${url}/rest/v1/usage_logs`, {
         method: 'POST',
-        headers: { 'apikey': key, 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        headers: { 'apikey': key, ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }), 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
         body: JSON.stringify(row),
       }, 5000);
       if (!res.ok) {
@@ -241,7 +241,7 @@ async function updateMemoryOutcome(
     const changed = await supabaseBreaker.call(async () => {
       const res = await fetchWithTimeout(`${url}/rest/v1/rpc/update_memory_outcome`, {
         method: 'POST',
-        headers: { 'apikey': key, 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+        headers: { 'apikey': key, ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }), 'Content-Type': 'application/json' },
         body: JSON.stringify(args),
       });
       if (!res.ok) {
@@ -282,7 +282,7 @@ function createSupabaseClient(env: Env) {
   const key = env.SUPABASE_SERVICE_KEY;
   const headers = {
     'apikey': key,
-    'Authorization': `Bearer ${key}`,
+    ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }),
     'Content-Type': 'application/json'
   };
 
@@ -1466,7 +1466,7 @@ export class CognitiveCore extends McpAgent<Env> {
               method: 'POST',
               headers: {
                 'apikey': key,
-                'Authorization': `Bearer ${key}`,
+                ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }),
                 'Content-Type': 'application/json'
               },
               body: JSON.stringify({
@@ -1620,7 +1620,7 @@ export class CognitiveCore extends McpAgent<Env> {
                 // Dormant only while everyone's lattice was empty — b30f3b1 shipped the
                 // tools that fill it, which is what armed this. Found by Kai, 2026-08-18.
                 const resp = await fetch(`${url}/rest/v1/${table}?id=in.(${idList})&select=id,content,memory_type,salience,outcome_score,created_at`, {
-                  headers: { 'apikey': key, 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }
+                  headers: { 'apikey': key, ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }), 'Content-Type': 'application/json' }
                 });
                 // Without this check an error body simply failed Array.isArray and
                 // left contentMap empty, which drops every graph row on the filter
@@ -1710,7 +1710,7 @@ export class CognitiveCore extends McpAgent<Env> {
             const pairs = allPairs.slice(0, MAX_PAIRS).map(([a, b]) =>
               fetch(`${url}/rest/v1/rpc/record_co_surfacing`, {
                 method: 'POST',
-                headers: { 'apikey': key, 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+                headers: { 'apikey': key, ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }), 'Content-Type': 'application/json' },
                 body: JSON.stringify({ p_memory_a: a, p_memory_b: b })
               })
             );
@@ -4295,7 +4295,7 @@ export class CognitiveCore extends McpAgent<Env> {
               acceptedContent = args.final_content.trim();
               const response = await fetchWithTimeout(`${url}/rest/v1/rpc/accept_identity_proposal`, {
                 method: 'POST',
-                headers: { 'apikey': key, 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+                headers: { 'apikey': key, ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }), 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   target_proposal_id: proposal.id,
                   reviewed_content: acceptedContent,
@@ -4354,7 +4354,7 @@ export class CognitiveCore extends McpAgent<Env> {
 
           const insertRes = await fetch(`${url}/rest/v1/memory_connections`, {
             method: 'POST',
-            headers: { 'apikey': key, 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+            headers: { 'apikey': key, ...(key.startsWith('sb_secret_') ? {} : { 'Authorization': `Bearer ${key}` }), 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
             body: JSON.stringify({
               source_id: p.memory_a,
               source_type: typeToInt[typeA!],
