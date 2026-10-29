@@ -20,6 +20,23 @@ interface Env {
   AI: any; // Cloudflare Workers AI binding
 }
 
+// Read observed ChatGPT events through an invoker RPC; never query OLD YUNA.
+export async function fetchConversationExperiences(env: Pick<Env, 'SUPABASE_URL' | 'SUPABASE_SERVICE_KEY'>, hoursBack: number = 24): Promise<unknown[]> {
+  const hours = Number.isFinite(hoursBack) ? Math.min(72, Math.max(1, Math.trunc(hoursBack))) : 24;
+  return supabaseBreaker.call(async () => {
+    const key = env.SUPABASE_SERVICE_KEY;
+    const response = await fetchWithTimeout(`${env.SUPABASE_URL}/rest/v1/rpc/cogcor_processing_moments_v1`, {
+      method: 'POST',
+      headers: { apikey: key, ...(key.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${key}` }), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_hours: hours, p_limit: 10 }),
+    });
+    if (!response.ok) throw supabaseError(`conversation experience read failed: ${response.status}`, response.status);
+    const rows: unknown = await response.json();
+    if (!Array.isArray(rows)) throw new Error('Invalid conversation experience response; not an empty memory result');
+    return rows;
+  }, []);
+}
+
 // Embedding helper with HuggingFace primary + Cloudflare AI fallback
 async function generateEmbedding(text: string, hfToken: string, ai?: any): Promise<number[] | null> {
   return embeddingBreaker.call(async () => {
@@ -4992,7 +5009,11 @@ export class CognitiveCore extends McpAgent<Env> {
           }) || [];
         }
 
+        const conversationExperiences = await fetchConversationExperiences(this.env, hours_back || 24);
         const context = {
+          conversation_experiences: conversationExperiences,
+          experience_coverage: 'observed_events_only_not_complete_transcript',
+          interpretation_boundary: 'Preserve evidence_type and source_ref; interpretations are not user facts. Saving is not learning success.',
           timeframe: `Last ${hours_back || 24} hours`,
           gathered_at: new Date().toISOString(),
           sessions: Array.isArray(sessions) ? sessions : [],
@@ -6649,7 +6670,11 @@ export class CognitiveCore extends McpAgent<Env> {
           }) || [];
         }
 
+        const conversationExperiences = await fetchConversationExperiences(env, Number(hours_back));
         return jsonResponse({
+          conversation_experiences: conversationExperiences,
+          experience_coverage: 'observed_events_only_not_complete_transcript',
+          interpretation_boundary: 'Preserve evidence_type and source_ref; interpretations are not user facts. Saving is not learning success.',
           timeframe: `Last ${hours_back} hours`,
           gathered_at: new Date().toISOString(),
           sessions: Array.isArray(sessions) ? sessions : [],
