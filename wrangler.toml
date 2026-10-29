@@ -1,4 +1,5 @@
-name = "cognitive-core"
+
+name = "yuna-cogcor-v2"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -10,7 +11,7 @@ binding = "AI"
 enabled = true
 
 [[durable_objects.bindings]]
-name = "yuna-cogcor-v2"
+name = "COGNITIVE_CORE"
 class_name = "CognitiveCore"
 
 [[migrations]]
@@ -19,7 +20,7 @@ new_sqlite_classes = ["CognitiveCore"]
 
 [vars]
 # Non-sensitive config vars
-# TIMEZONE_OFFSET = 8  # GMT offset for your timezone (default: GMT+8)
+# TIMEZONE_OFFSET = 9
 
 # Secrets (set via wrangler secret put):
 # - MCP_API_KEY
