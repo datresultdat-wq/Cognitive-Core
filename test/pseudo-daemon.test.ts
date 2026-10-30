@@ -113,17 +113,62 @@ describe('manual test entry point', () => {
   const response=await worker.fetch(new Request(url,{method:'POST',headers:{Authorization:'Bearer fixture-key'},body:JSON.stringify(body)}),env as any,{} as any);
   expect(response.status).toBe(400);expect(runner.runPseudoDaemonTick).not.toHaveBeenCalled();
  });
- it('routes scheduled ticks to a DB-gated production runner',async()=>{
-  const runner={setName:vi.fn(async()=>{}),runPseudoDaemonTick:vi.fn(async()=>({status:'disabled'}))};
-  const env={COGNITIVE_CORE:{idFromName:vi.fn((n:string)=>n),get:vi.fn(()=>runner)}};
+ it('never touches the model while automatic processing is disarmed',async()=>{
+  const calls:string[]=[];
+  vi.stubGlobal('fetch',vi.fn(async(input:any)=>{
+    calls.push(String(input));
+    return Response.json({status:'disarmed'});
+  }));
+  const runner={setName:vi.fn(async()=>{}),runPseudoDaemonTick:vi.fn(async()=>({status:'completed'}))};
+  const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',
+    COGNITIVE_CORE:{idFromName:vi.fn((n:string)=>n),get:vi.fn(()=>runner)}};
   const pending:Promise<unknown>[]=[];
-  const ctx={waitUntil:vi.fn((p:Promise<unknown>)=>pending.push(p))};
-  const event={scheduledTime:Date.now()};
-  await worker.scheduled(event,env as any,ctx as any);
+  await worker.scheduled({scheduledTime:Date.now()},env as any,
+    {waitUntil:(p:Promise<unknown>)=>pending.push(p)} as any);
   await Promise.all(pending);
-  expect(runner.setName).toHaveBeenCalledWith('streamable-http:cogcor-pseudo-daemon-production-v1');
-  expect(runner.runPseudoDaemonTick).toHaveBeenCalledWith(event.scheduledTime,false);
-  expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toContain('cogcor_daemon_auto_reserve_v1');
+  expect(runner.runPseudoDaemonTick).not.toHaveBeenCalled();
+ });
+ it('runs exactly one approved event and finalizes without leaking the approval',async()=>{
+  const approval='10000000-0000-4000-8000-000000000001';
+  const calls:any[]=[];
+  vi.stubGlobal('fetch',vi.fn(async(input:any,init:any)=>{
+    const name=String(input).split('/').at(-1);
+    calls.push({name,args:JSON.parse(init.body)});
+    return Response.json(name==='cogcor_daemon_auto_reserve_v1'
+      ?{status:'approved',approval_id:approval}:{status:'completed'});
+  }));
+  const runner={setName:vi.fn(async()=>{}),runPseudoDaemonTick:vi.fn(async()=>({status:'completed'}))};
+  const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',
+    COGNITIVE_CORE:{idFromName:(n:string)=>n,get:()=>runner}};
+  const pending:Promise<unknown>[]=[];const tick=Date.now();
+  await worker.scheduled({scheduledTime:tick},env as any,
+    {waitUntil:(p:Promise<unknown>)=>pending.push(p)} as any);
+  await Promise.all(pending);
+  expect(runner.runPseudoDaemonTick).toHaveBeenCalledTimes(1);
+  expect(runner.runPseudoDaemonTick).toHaveBeenCalledWith(tick,false,approval);
+  expect(calls.map(x=>x.name)).toEqual(['cogcor_daemon_auto_reserve_v1','cogcor_daemon_auto_finalize_v1']);
+  expect(calls[1].args.p_success).toBe(true);
+ });
+ it('disarms automatic processing after a failed run',async()=>{
+  const approval='10000000-0000-4000-8000-000000000001';
+  const calls:any[]=[];
+  vi.stubGlobal('fetch',vi.fn(async(input:any,init:any)=>{
+    const name=String(input).split('/').at(-1);
+    calls.push({name,args:JSON.parse(init.body)});
+    return Response.json(name==='cogcor_daemon_auto_reserve_v1'
+      ?{status:'approved',approval_id:approval}:{status:'disarmed'});
+  }));
+  const runner={setName:vi.fn(async()=>{}),runPseudoDaemonTick:vi.fn(async()=>({status:'failed'}))};
+  const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',
+    COGNITIVE_CORE:{idFromName:(n:string)=>n,get:()=>runner}};
+  const pending:Promise<unknown>[]=[];
+  await worker.scheduled({scheduledTime:Date.now()},env as any,
+    {waitUntil:(p:Promise<unknown>)=>pending.push(p)} as any);
+  const results=await Promise.allSettled(pending);
+  expect(results[0].status).toBe('rejected');
+  expect(calls.at(-1)?.args.p_success).toBe(false);
  });
  it('blocks a production claim before reading native data or invoking AI',async()=>{
   vi.stubGlobal('fetch',vi.fn(async(input:any)=>Response.json(String(input).endsWith('claim_v1')?{status:'claimed',namespace:'production',run_id:'r',event:{id:1},inference_approved:true}:null)));
