@@ -124,3 +124,15 @@ describe('manual test entry point', () => {
   expect(invoke).not.toHaveBeenCalled();expect(env.AI.run).not.toHaveBeenCalled();
  });
 });
+
+
+describe('PostgREST response contracts',()=>{
+ it.each(['stage','candidate','finish'])('accepts empty 204 for void %s RPC',async kind=>{
+  vi.stubGlobal('fetch',vi.fn(async()=>new Response(null,{status:204})));
+  expect(await daemonRpc({SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'fixture'},`cogcor_daemon_${kind}_v1`,{})).toBeNull();
+ });
+ it('does not turn an empty claim response into success',async()=>{
+  vi.stubGlobal('fetch',vi.fn(async()=>new Response(null,{status:204})));
+  await expect(daemonRpc({SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'fixture'},'cogcor_daemon_claim_v1',{})).rejects.toThrow();
+ });
+});

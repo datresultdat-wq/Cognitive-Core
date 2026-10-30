@@ -14,6 +14,8 @@ export async function daemonRpc(env: Environment, name: string, args: Record<str
     body: JSON.stringify(args), signal: AbortSignal.timeout(10000),
   });
   if (!response.ok) throw new Error(`Daemon RPC ${name}: HTTP ${response.status}`);
+  // PostgREST returns 204 with no body for PostgreSQL RETURNS void RPCs.
+  if (response.status === 204 && ['cogcor_daemon_stage_v1', 'cogcor_daemon_candidate_v1', 'cogcor_daemon_finish_v1'].includes(name)) return null;
   return response.json();
 }
 
