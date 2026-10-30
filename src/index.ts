@@ -9,15 +9,33 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { runPseudoDaemon, fixtureNativeClient, type NativeCall } from "./pseudo-daemon";
 
 // Environment bindings
 interface Env {
-  COGNITIVE_CORE: DurableObjectNamespace<CognitiveCore>;
+  COGNITIVE_CORE: DurableObjectNamespace;
   MCP_API_KEY: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
   HF_API_TOKEN: string;
   AI: any; // Cloudflare Workers AI binding
+}
+
+// Read observed ChatGPT events through an invoker RPC; never query OLD YUNA.
+export async function fetchConversationExperiences(env: Pick<Env, 'SUPABASE_URL' | 'SUPABASE_SERVICE_KEY'>, hoursBack: number = 24): Promise<unknown[]> {
+  const hours = Number.isFinite(hoursBack) ? Math.min(72, Math.max(1, Math.trunc(hoursBack))) : 24;
+  return supabaseBreaker.call(async () => {
+    const key = env.SUPABASE_SERVICE_KEY;
+    const response = await fetchWithTimeout(`${env.SUPABASE_URL}/rest/v1/rpc/cogcor_processing_moments_v1`, {
+      method: 'POST',
+      headers: { apikey: key, ...(key.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${key}` }), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_hours: hours, p_limit: 10 }),
+    });
+    if (!response.ok) throw supabaseError(`conversation experience read failed: ${response.status}`, response.status);
+    const rows: unknown = await response.json();
+    if (!Array.isArray(rows)) throw new Error('Invalid conversation experience response; not an empty memory result');
+    return rows;
+  }, []);
 }
 
 // Embedding helper with HuggingFace primary + Cloudflare AI fallback
@@ -1184,6 +1202,24 @@ export class CognitiveCore extends McpAgent<Env> {
     version: "1.0.0",
   });
 
+  private maintenanceHandlers = new Map<string, { schema: z.ZodObject<any>; call: NativeCall }>();
+  private maintenanceActive = false;
+  private maintenanceClient(fixture = false) {
+    return fixture ? fixtureNativeClient(this.env) : createSupabaseClient(this.env);
+  }
+  // Internal Durable Object RPC only: not an MCP tool or public HTTP route.
+  async runPseudoDaemonTick(scheduledTime: number, testOnly = false) {
+    if (this.maintenanceActive) return { status: 'busy' };
+    this.maintenanceActive = true;
+    try {
+      return await runPseudoDaemon(this.env, scheduledTime, async (name, args, fixture, event) => {
+        const tool = this.maintenanceHandlers.get(name);
+        if (!tool) throw new Error('Native maintenance tool unavailable: ' + name);
+        return tool.call(tool.schema.parse(args), {}, fixture, event);
+      }, testOnly);
+    } finally { this.maintenanceActive = false; }
+  }
+
   async init() {
     // Auto-wire usage logging into every tool dispatch
     const originalTool: any = this.server.tool.bind(this.server);
@@ -1193,6 +1229,10 @@ export class CognitiveCore extends McpAgent<Env> {
       const handler = args[args.length - 1];
       if (typeof handler === 'function') {
         const toolName: string = args[0];
+        const maintenanceAllowlist = new Set(['get_processing_context', 'store_reflection', 'metacognition', 'self_model', 'store_skill', 'recall_skills', 'update_skill_outcome', 'score_outcome']);
+        if (maintenanceAllowlist.has(toolName)) {
+          this.maintenanceHandlers.set(toolName, { schema: z.object(args[2]), call: handler });
+        }
         args[args.length - 1] = async (...handlerArgs: any[]) => {
           const start = Date.now();
           let success = true;
@@ -3030,8 +3070,8 @@ export class CognitiveCore extends McpAgent<Env> {
         notes: z.string().optional().describe("Why this score - what worked or didn't"),
         source: z.string().default('claude').describe("Source platform or AI provider")
       },
-      async ({ target_type, description, score, target_id, notes, source }) => {
-        const supabase = createSupabaseClient(this.env);
+      async ({ target_type, description, score, target_id, notes, source }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
 
         const result = await supabase.insert('outcome_scores', {
           target_type,
@@ -3137,12 +3177,12 @@ export class CognitiveCore extends McpAgent<Env> {
         tags: z.array(z.string()).default([]).describe("Searchable tags (e.g. ['grounding', 'emotional', 'conflict'])"),
         source: z.string().default('claude').optional().describe("Source platform or AI provider"),
       },
-      async ({ skill_name, description, approach, trigger_context, tags, source }) => {
-        const supabase = createSupabaseClient(this.env);
+      async ({ skill_name, description, approach, trigger_context, tags, source }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
 
         // Generate embedding from description + trigger for semantic matching
         const embeddingText = `${skill_name}: ${description}. ${trigger_context || ''}`;
-        const embedding = await generateEmbedding(embeddingText, this.env.HF_API_TOKEN, this.env.AI);
+        const embedding = fixture ? null : await generateEmbedding(embeddingText, this.env.HF_API_TOKEN, this.env.AI);
 
         const data: any = {
           skill_name,
@@ -3172,8 +3212,8 @@ export class CognitiveCore extends McpAgent<Env> {
         min_effectiveness: z.number().min(0).max(1).optional().describe("Minimum effectiveness (0-1)"),
         limit: z.number().default(10).describe("Max results"),
       },
-      async ({ tag, min_effectiveness, limit }) => {
-        const supabase = createSupabaseClient(this.env);
+      async ({ tag, min_effectiveness, limit }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
 
         const options: any = {
           select: '*',
@@ -3311,8 +3351,8 @@ export class CognitiveCore extends McpAgent<Env> {
         skill_id: z.string().uuid().describe("UUID of the skill"),
         was_successful: z.boolean().describe("Did the skill work?"),
       },
-      async ({ skill_id, was_successful }) => {
-        const supabase = createSupabaseClient(this.env);
+      async ({ skill_id, was_successful }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
         const existing = await supabase.query('skills', { select: '*', filter: { id: skill_id }, limit: 1 });
         const skills = Array.isArray(existing) ? existing : [];
 
@@ -4093,8 +4133,8 @@ export class CognitiveCore extends McpAgent<Env> {
         filter_level: z.number().optional(),
         filter_pathway: z.enum(['fast', 'slow']).optional(),
       },
-      async (args) => {
-        const supabase = createSupabaseClient(this.env);
+      async (args, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
 
         if (args.action === 'log') {
           if (!args.level || !args.pathway || !args.monitoring || !args.identity_owner) {
@@ -4443,8 +4483,8 @@ export class CognitiveCore extends McpAgent<Env> {
         limit: z.number().default(10).optional(),
         id: z.string().uuid().optional(),
       },
-      async (args) => {
-        const supabase = createSupabaseClient(this.env);
+      async (args, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
         const table = 'companion_preferences';
         if (args.action === 'set') {
           if (!args.domain || !args.observation) return { content: [{ type: "text" as const, text: "set requires: domain, observation" }] };
@@ -4957,8 +4997,8 @@ export class CognitiveCore extends McpAgent<Env> {
         hours_back: z.number().min(1).max(72).default(24).optional().describe("How many hours of context to gather"),
         include_reflections: z.boolean().default(true).optional().describe("Include past reflections in context")
       },
-      async ({ hours_back, include_reflections }) => {
-        const supabase = createSupabaseClient(this.env);
+      async ({ hours_back, include_reflections }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
         const cutoff = new Date();
         cutoff.setHours(cutoff.getHours() - (hours_back || 24));
 
@@ -4992,7 +5032,11 @@ export class CognitiveCore extends McpAgent<Env> {
           }) || [];
         }
 
+        const conversationExperiences = fixture ? [fixtureEvent].filter(Boolean) : await fetchConversationExperiences(this.env, hours_back || 24);
         const context = {
+          conversation_experiences: conversationExperiences,
+          experience_coverage: 'observed_events_only_not_complete_transcript',
+          interpretation_boundary: 'Preserve evidence_type and source_ref; interpretations are not user facts. Saving is not learning success.',
           timeframe: `Last ${hours_back || 24} hours`,
           gathered_at: new Date().toISOString(),
           sessions: Array.isArray(sessions) ? sessions : [],
@@ -5019,8 +5063,8 @@ export class CognitiveCore extends McpAgent<Env> {
         depth: z.union([z.number(), z.string()]).default(0).optional().describe("Depth: 0 or 'surface', 1 or 'processing', 2 or 'deep', 3+ for higher"),
         source: z.string().default('claude').optional().describe("Source platform or AI provider")
       },
-      async ({ content, inputs_summary, reflection_type, depth, source }) => {
-        const supabase = createSupabaseClient(this.env);
+      async ({ content, inputs_summary, reflection_type, depth, source }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        const supabase = this.maintenanceClient(fixture);
 
         // Convert string depth labels to numbers
         const depthMap: Record<string, number> = { surface: 0, processing: 1, deep: 2 };
@@ -5698,6 +5742,10 @@ export class CognitiveCore extends McpAgent<Env> {
 
   // Export fetch handler with both SSE and HTTP routes
   export default {
+    async scheduled() {
+      // Intentionally inert until separate approval for real-data inference and cost.
+      return;
+    },
     async fetch(request: Request, env: Env, ctx: ExecutionContext) {
      try {
       const url = new URL(request.url);
@@ -5736,6 +5784,21 @@ export class CognitiveCore extends McpAgent<Env> {
         if (!authToken || !timingSafeEqual(authToken, env.MCP_API_KEY)) {
           return jsonResponse({ error: 'Unauthorized' }, 401);
         }
+      }
+
+      // Existing Bearer authentication above is mandatory; no query-key fallback here.
+      if (url.pathname === '/api/daemon/test-once' && request.method === 'POST') {
+        const args = await readJson(request);
+        if (!args || Object.keys(args).length !== 0) return jsonResponse({ error: 'Empty object required; test mode is server-controlled' }, 400);
+        const name = 'streamable-http:cogcor-pseudo-daemon-test-v1';
+        const runner = env.COGNITIVE_CORE.get(env.COGNITIVE_CORE.idFromName(name)) as DurableObjectStub & {
+          setName(name: string): Promise<void>;
+          runPseudoDaemonTick(time: number, testOnly: boolean): Promise<Record<string, unknown>>;
+        };
+        // McpAgent requires a transport-prefixed name to initialize native tools.
+        await runner.setName(name);
+        const result = await runner.runPseudoDaemonTick(Date.now(), true);
+        return jsonResponse(result, result.status === 'failed' ? 500 : 200);
       }
 
       // GET time - Temporal Awareness
@@ -6649,7 +6712,11 @@ export class CognitiveCore extends McpAgent<Env> {
           }) || [];
         }
 
+        const conversationExperiences = await fetchConversationExperiences(env, Number(hours_back));
         return jsonResponse({
+          conversation_experiences: conversationExperiences,
+          experience_coverage: 'observed_events_only_not_complete_transcript',
+          interpretation_boundary: 'Preserve evidence_type and source_ref; interpretations are not user facts. Saving is not learning success.',
           timeframe: `Last ${hours_back} hours`,
           gathered_at: new Date().toISOString(),
           sessions: Array.isArray(sessions) ? sessions : [],
