@@ -9,7 +9,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { runPseudoDaemon, fixtureNativeClient, fetchObservedOutcomes, type NativeCall } from "./pseudo-daemon";
+import { runPseudoDaemon, fixtureNativeClient, fetchObservedOutcomes, daemonRpc, type NativeCall } from "./pseudo-daemon";
 
 // Environment bindings
 interface Env {
@@ -5752,19 +5752,42 @@ export class CognitiveCore extends McpAgent<Env> {
   // Export fetch handler with both SSE and HTTP routes
   export default {
     async scheduled(event: { scheduledTime: number }, env: Env, ctx: ExecutionContext) {
-      // Only a DB-authorized production job can perform inference. With the
-      // existing control row disabled, this call exits before any model use.
-      const name = 'streamable-http:cogcor-pseudo-daemon-production-v1';
-      const runner = env.COGNITIVE_CORE.get(env.COGNITIVE_CORE.idFromName(name)) as DurableObjectStub & {
-        setName(name: string): Promise<void>;
-        runPseudoDaemonTick(time: number, testOnly: boolean): Promise<Record<string, unknown>>;
-      };
+      // Cron is inert unless an explicitly armed, DB-bounded automatic grant is returned.
+      // The stored manual 1-shot claim still consumes the grant before the single model call.
       ctx.waitUntil((async () => {
-        await runner.setName(name);
-        const result = await runner.runPseudoDaemonTick(event.scheduledTime, false);
-        if (result.status === 'failed') {
-          // The DB keeps stage receipts; never retry an uncertain write here.
-          throw new Error('CogCor daemon failed: inspect job_runs and job_stages');
+        const grant = await daemonRpc(env, 'cogcor_daemon_auto_reserve_v1', {
+          p_tick: new Date(event.scheduledTime).toISOString(),
+        });
+        if (grant?.status !== 'approved') {
+          const stopped = ['invalid_tick','disarmed','misconfigured','busy_or_pending_approval',
+            'paused_after_failure','daily_limit','paused_candidate_backlog','no_eligible_new_event',
+            'paused_unfinished_reservation','paused_running_job'];
+          if (!stopped.includes(grant?.status)) throw new Error('Invalid automatic reservation response');
+          return;
+        }
+        if (!z.string().uuid().safeParse(grant.approval_id).success) {
+          throw new Error('Invalid automatic approval: disarm manually');
+        }
+        let succeeded = false;
+        try {
+          const name = 'streamable-http:cogcor-pseudo-daemon-production-v1';
+          const runner = env.COGNITIVE_CORE.get(env.COGNITIVE_CORE.idFromName(name)) as DurableObjectStub & {
+            setName(name: string): Promise<void>;
+            runPseudoDaemonTick(time: number, testOnly: boolean, approvalId: string): Promise<Record<string, unknown>>;
+          };
+          await runner.setName(name);
+          const result = await runner.runPseudoDaemonTick(event.scheduledTime, false, grant.approval_id);
+          succeeded = result.status === 'completed';
+          if (!succeeded) throw new Error('Scheduled daemon did not complete; review DB receipts');
+        } finally {
+          // Failure disarms future runs. If finalization fails, the still-open
+          // auto_approval_id blocks any new reservation until manually reviewed.
+          const receipt = await daemonRpc(env, 'cogcor_daemon_auto_finalize_v1', {
+            p_approval_id: grant.approval_id, p_success: succeeded,
+          });
+          if (receipt?.status !== (succeeded ? 'completed' : 'disarmed')) {
+            throw new Error('Automatic approval finalization failed; review control state');
+          }
         }
       })());
     },
