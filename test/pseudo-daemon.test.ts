@@ -76,9 +76,9 @@ describe('bounded host calls the existing native handlers',()=>{
    if(String(input).endsWith('cogcor_daemon_finish_v1'))finish.push(JSON.parse(init.body));
    return Response.json(null);
   }));
-  const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',AI:{run:vi.fn(async()=>({response:'{"reflection":"x","candidate":"x","self_model_question":"x","promote_to_essence":true}'}))}};
+  const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',AI:{run:vi.fn(async()=>({response:'{"reflection":"x","candidate":false,"self_model_question":"x","promote_to_essence":true}'}))}};
   expect(await runPseudoDaemon(env,Date.now(),async name=>{calls.push(name);return {content:[{type:'text',text:JSON.stringify({observed_learning_outcomes:[]})}]}; },false,'10000000-0000-4000-8000-000000000001')).toMatchObject({status:'failed',needs_review:false});
-  expect(calls).toEqual(['get_processing_context','self_model']);expect(finish[0].p_retry_safe).toBe(true);expect(env.AI.run).toHaveBeenCalledTimes(1);
+  expect(calls).toEqual(['get_processing_context','self_model']);expect(finish[0].p_retry_safe).toBe(false);expect(finish[0].p_error).toBe('AI_OUTPUT_FIELDS');expect(env.AI.run).toHaveBeenCalledTimes(1);
  });
 });
 
