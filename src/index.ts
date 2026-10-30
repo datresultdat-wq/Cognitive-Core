@@ -9,7 +9,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { runPseudoDaemon, fixtureNativeClient, type NativeCall } from "./pseudo-daemon";
+import { runPseudoDaemon, fixtureNativeClient, fetchObservedOutcomes, type NativeCall } from "./pseudo-daemon";
 
 // Environment bindings
 interface Env {
@@ -1208,7 +1208,7 @@ export class CognitiveCore extends McpAgent<Env> {
     return fixture ? fixtureNativeClient(this.env) : createSupabaseClient(this.env);
   }
   // Internal Durable Object RPC only: not an MCP tool or public HTTP route.
-  async runPseudoDaemonTick(scheduledTime: number, testOnly = false) {
+  async runPseudoDaemonTick(scheduledTime: number, testOnly = false, approvalId?: string) {
     if (this.maintenanceActive) return { status: 'busy' };
     this.maintenanceActive = true;
     try {
@@ -1216,7 +1216,7 @@ export class CognitiveCore extends McpAgent<Env> {
         const tool = this.maintenanceHandlers.get(name);
         if (!tool) throw new Error('Native maintenance tool unavailable: ' + name);
         return tool.call(tool.schema.parse(args), {}, fixture, event);
-      }, testOnly);
+      }, testOnly, approvalId);
     } finally { this.maintenanceActive = false; }
   }
 
@@ -4998,6 +4998,13 @@ export class CognitiveCore extends McpAgent<Env> {
         include_reflections: z.boolean().default(true).optional().describe("Include past reflections in context")
       },
       async ({ hours_back, include_reflections }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
+        if (!fixture && fixtureEvent) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({
+            conversation_experiences: [fixtureEvent],
+            observed_learning_outcomes: await fetchObservedOutcomes(this.env, hours_back || 24),
+            interpretation_boundary: 'Observed outcomes are evidence, not confirmed user facts or identity.'
+          }) }] };
+        }
         const supabase = this.maintenanceClient(fixture);
         const cutoff = new Date();
         cutoff.setHours(cutoff.getHours() - (hours_back || 24));
@@ -5033,8 +5040,10 @@ export class CognitiveCore extends McpAgent<Env> {
         }
 
         const conversationExperiences = fixture ? [fixtureEvent].filter(Boolean) : await fetchConversationExperiences(this.env, hours_back || 24);
+        const observedLearningOutcomes = fixture ? [] : await fetchObservedOutcomes(this.env, hours_back || 24);
         const context = {
           conversation_experiences: conversationExperiences,
+          observed_learning_outcomes: observedLearningOutcomes,
           experience_coverage: 'observed_events_only_not_complete_transcript',
           interpretation_boundary: 'Preserve evidence_type and source_ref; interpretations are not user facts. Saving is not learning success.',
           timeframe: `Last ${hours_back || 24} hours`,
@@ -5742,9 +5751,22 @@ export class CognitiveCore extends McpAgent<Env> {
 
   // Export fetch handler with both SSE and HTTP routes
   export default {
-    async scheduled() {
-      // Intentionally inert until separate approval for real-data inference and cost.
-      return;
+    async scheduled(event: { scheduledTime: number }, env: Env, ctx: ExecutionContext) {
+      // Only a DB-authorized production job can perform inference. With the
+      // existing control row disabled, this call exits before any model use.
+      const name = 'streamable-http:cogcor-pseudo-daemon-production-v1';
+      const runner = env.COGNITIVE_CORE.get(env.COGNITIVE_CORE.idFromName(name)) as DurableObjectStub & {
+        setName(name: string): Promise<void>;
+        runPseudoDaemonTick(time: number, testOnly: boolean): Promise<Record<string, unknown>>;
+      };
+      ctx.waitUntil((async () => {
+        await runner.setName(name);
+        const result = await runner.runPseudoDaemonTick(event.scheduledTime, false);
+        if (result.status === 'failed') {
+          // The DB keeps stage receipts; never retry an uncertain write here.
+          throw new Error('CogCor daemon failed: inspect job_runs and job_stages');
+        }
+      })());
     },
     async fetch(request: Request, env: Env, ctx: ExecutionContext) {
      try {
@@ -5798,6 +5820,20 @@ export class CognitiveCore extends McpAgent<Env> {
         // McpAgent requires a transport-prefixed name to initialize native tools.
         await runner.setName(name);
         const result = await runner.runPseudoDaemonTick(Date.now(), true);
+        return jsonResponse(result, result.status === 'failed' ? 500 : 200);
+      }
+
+      // Production execution requires a short-lived DB approval bound to one event.
+      if (url.pathname === '/api/daemon/run-once' && request.method === 'POST') {
+        const parsed = z.object({ approval_id: z.string().uuid() }).strict().safeParse(await readJson(request));
+        if (!parsed.success) return jsonResponse({ error: 'A single approval_id is required' }, 400);
+        const name = 'streamable-http:cogcor-pseudo-daemon-production-v1';
+        const runner = env.COGNITIVE_CORE.get(env.COGNITIVE_CORE.idFromName(name)) as DurableObjectStub & {
+          setName(name: string): Promise<void>;
+          runPseudoDaemonTick(time: number, testOnly: boolean, approvalId: string): Promise<Record<string, unknown>>;
+        };
+        await runner.setName(name);
+        const result = await runner.runPseudoDaemonTick(Date.now(), false, parsed.data.approval_id);
         return jsonResponse(result, result.status === 'failed' ? 500 : 200);
       }
 

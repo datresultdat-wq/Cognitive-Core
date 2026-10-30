@@ -77,7 +77,7 @@ describe('bounded host calls the existing native handlers',()=>{
    return Response.json(null);
   }));
   const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',AI:{run:vi.fn(async()=>({response:'{"reflection":"x","candidate":"x","self_model_question":"x","promote_to_essence":true}'}))}};
-  expect(await runPseudoDaemon(env,Date.now(),async name=>{calls.push(name);return {}; })).toMatchObject({status:'failed',needs_review:false});
+  expect(await runPseudoDaemon(env,Date.now(),async name=>{calls.push(name);return {content:[{type:'text',text:JSON.stringify({observed_learning_outcomes:[]})}]}; },false,'10000000-0000-4000-8000-000000000001')).toMatchObject({status:'failed',needs_review:false});
   expect(calls).toEqual(['get_processing_context','self_model']);expect(finish[0].p_retry_safe).toBe(true);expect(env.AI.run).toHaveBeenCalledTimes(1);
  });
 });
@@ -113,9 +113,17 @@ describe('manual test entry point', () => {
   const response=await worker.fetch(new Request(url,{method:'POST',headers:{Authorization:'Bearer fixture-key'},body:JSON.stringify(body)}),env as any,{} as any);
   expect(response.status).toBe(400);expect(runner.runPseudoDaemonTick).not.toHaveBeenCalled();
  });
- it('keeps scheduled execution inert',async()=>{
-  const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
-  await worker.scheduled();expect(fetcher).not.toHaveBeenCalled();
+ it('routes scheduled ticks to a DB-gated production runner',async()=>{
+  const runner={setName:vi.fn(async()=>{}),runPseudoDaemonTick:vi.fn(async()=>({status:'disabled'}))};
+  const env={COGNITIVE_CORE:{idFromName:vi.fn((n:string)=>n),get:vi.fn(()=>runner)}};
+  const pending:Promise<unknown>[]=[];
+  const ctx={waitUntil:vi.fn((p:Promise<unknown>)=>pending.push(p))};
+  const event={scheduledTime:Date.now()};
+  await worker.scheduled(event,env as any,ctx as any);
+  await Promise.all(pending);
+  expect(runner.setName).toHaveBeenCalledWith('streamable-http:cogcor-pseudo-daemon-production-v1');
+  expect(runner.runPseudoDaemonTick).toHaveBeenCalledWith(event.scheduledTime,false);
+  expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
  });
  it('blocks a production claim before reading native data or invoking AI',async()=>{
   vi.stubGlobal('fetch',vi.fn(async(input:any)=>Response.json(String(input).endsWith('claim_v1')?{status:'claimed',namespace:'production',run_id:'r',event:{id:1},inference_approved:true}:null)));
@@ -134,5 +142,19 @@ describe('PostgREST response contracts',()=>{
  it('does not turn an empty claim response into success',async()=>{
   vi.stubGlobal('fetch',vi.fn(async()=>new Response(null,{status:204})));
   await expect(daemonRpc({SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'fixture'},'cogcor_daemon_claim_v1',{})).rejects.toThrow();
+ });
+});
+
+
+describe('production manual endpoint',()=>{
+ it('requires Bearer authentication before accessing a runner',async()=>{
+  const get=vi.fn();const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'fixture',MCP_API_KEY:'fixture-key',COGNITIVE_CORE:{get}};
+  const r=await worker.fetch(new Request('https://worker.invalid/api/daemon/run-once',{method:'POST',body:'{}'}),env as any,{} as any);
+  expect(r.status).toBe(401);expect(get).not.toHaveBeenCalled();
+ });
+ it.each([{}, {approval_id:'bad'}, {approval_id:'10000000-0000-4000-8000-000000000001',moment_id:1}])('rejects invalid or extra execution options',async body=>{
+  const get=vi.fn();const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'fixture',MCP_API_KEY:'fixture-key',COGNITIVE_CORE:{get}};
+  const r=await worker.fetch(new Request('https://worker.invalid/api/daemon/run-once',{method:'POST',headers:{Authorization:'Bearer fixture-key'},body:JSON.stringify(body)}),env as any,{} as any);
+  expect(r.status).toBe(400);expect(get).not.toHaveBeenCalled();
  });
 });
