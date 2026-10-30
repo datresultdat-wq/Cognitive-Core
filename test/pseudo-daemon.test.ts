@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('agents/mcp',()=>({McpAgent:class {env:any;constructor(_s:any,env:any){this.env=env;}static serve(){return {fetch(){}};}static serveSSE(){return {fetch(){}};}}}));
 vi.mock('@modelcontextprotocol/sdk/server/mcp.js',()=>({McpServer:class {tool(){}}}));
-import { CognitiveCore } from '../src/index';
+import worker, { CognitiveCore } from '../src/index';
 import { daemonRpc, runPseudoDaemon } from '../src/pseudo-daemon';
 afterEach(()=>vi.unstubAllGlobals());
 
@@ -79,5 +79,48 @@ describe('bounded host calls the existing native handlers',()=>{
   const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',AI:{run:vi.fn(async()=>({response:'{"reflection":"x","candidate":"x","self_model_question":"x","promote_to_essence":true}'}))}};
   expect(await runPseudoDaemon(env,Date.now(),async name=>{calls.push(name);return {}; })).toMatchObject({status:'failed',needs_review:false});
   expect(calls).toEqual(['get_processing_context','self_model']);expect(finish[0].p_retry_safe).toBe(true);expect(env.AI.run).toHaveBeenCalledTimes(1);
+ });
+});
+
+
+describe('manual test entry point', () => {
+ const url = 'https://fixture-worker.invalid/api/daemon/test-once';
+ function setup() {
+  const runner = {setName:vi.fn(async()=>{}),runPseudoDaemonTick:vi.fn(async()=>({status:'completed',test_only:true}))};
+  const env = {SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'sb_secret_fixture',MCP_API_KEY:'fixture-key',COGNITIVE_CORE:{idFromName:vi.fn(n=>n),get:vi.fn(()=>runner)}};
+  return {runner,env};
+ }
+ it.each([undefined,'wrong'])('rejects absent/wrong auth before accessing DO',async token=>{
+  const {runner,env}=setup();
+  const response=await worker.fetch(new Request(url,{method:'POST',headers:token?{Authorization:`Bearer ${token}`}:{},body:'{}'}),env as any,{} as any);
+  expect(response.status).toBe(401);expect(runner.setName).not.toHaveBeenCalled();
+ });
+ it('does not accept query-string authentication',async()=>{
+  const {runner,env}=setup();
+  expect((await worker.fetch(new Request(url+'?key=fixture-key',{method:'POST',body:'{}'}),env as any,{} as any)).status).toBe(401);
+  expect(runner.setName).not.toHaveBeenCalled();
+ });
+ it('forces test-only mode and initializes the DO before executing',async()=>{
+  const {runner,env}=setup();
+  const response=await worker.fetch(new Request(url,{method:'POST',headers:{Authorization:'Bearer fixture-key'},body:'{}'}),env as any,{} as any);
+  expect(response.status).toBe(200);
+  expect(runner.setName).toHaveBeenCalledWith('streamable-http:cogcor-pseudo-daemon-test-v1');
+  expect(runner.runPseudoDaemonTick).toHaveBeenCalledWith(expect.any(Number),true);
+  expect(runner.setName.mock.invocationCallOrder[0]).toBeLessThan(runner.runPseudoDaemonTick.mock.invocationCallOrder[0]);
+ });
+ it.each([{namespace:'production'},{tool:'store_skill'},null])('rejects caller-controlled options',async body=>{
+  const {runner,env}=setup();
+  const response=await worker.fetch(new Request(url,{method:'POST',headers:{Authorization:'Bearer fixture-key'},body:JSON.stringify(body)}),env as any,{} as any);
+  expect(response.status).toBe(400);expect(runner.runPseudoDaemonTick).not.toHaveBeenCalled();
+ });
+ it('keeps scheduled execution inert',async()=>{
+  const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
+  await worker.scheduled();expect(fetcher).not.toHaveBeenCalled();
+ });
+ it('blocks a production claim before reading native data or invoking AI',async()=>{
+  vi.stubGlobal('fetch',vi.fn(async(input:any)=>Response.json(String(input).endsWith('claim_v1')?{status:'claimed',namespace:'production',run_id:'r',event:{id:1},inference_approved:true}:null)));
+  const invoke=vi.fn();const env={SUPABASE_URL:'https://fixture.invalid',SUPABASE_SERVICE_KEY:'fixture',AI:{run:vi.fn()}};
+  expect(await runPseudoDaemon(env,Date.now(),invoke,true)).toMatchObject({status:'failed'});
+  expect(invoke).not.toHaveBeenCalled();expect(env.AI.run).not.toHaveBeenCalled();
  });
 });

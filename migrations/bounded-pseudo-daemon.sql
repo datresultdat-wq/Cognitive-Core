@@ -1,5 +1,7 @@
 -- Operational execution state only. Existing memory/identity rows are untouched.
 BEGIN;
+SET LOCAL lock_timeout='3s';
+SET LOCAL statement_timeout='30s';
 CREATE SCHEMA cogcor_daemon_private;
 CREATE SCHEMA cogcor_daemon_test;
 REVOKE ALL ON SCHEMA cogcor_daemon_private,cogcor_daemon_test FROM PUBLIC,anon,authenticated;
@@ -39,11 +41,14 @@ ALTER TABLE cogcor_daemon_private.control ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cogcor_daemon_private.queue ENABLE ROW LEVEL SECURITY;
 GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA cogcor_daemon_private TO service_role;
 
-CREATE FUNCTION public.cogcor_daemon_claim_v1(p_tick timestamptz) RETURNS jsonb
+CREATE FUNCTION public.cogcor_daemon_claim_v1(p_tick timestamptz,p_test_only boolean DEFAULT false) RETURNS jsonb
 LANGUAGE plpgsql SECURITY INVOKER SET search_path='' AS $body$
 DECLARE c cogcor_daemon_private.control; q cogcor_daemon_private.queue; r uuid; m jsonb; n integer; slot timestamptz;
 BEGIN
  SELECT * INTO c FROM cogcor_daemon_private.control WHERE id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Missing control row'; END IF;
+ IF p_tick IS NULL OR p_test_only IS NULL THEN RAISE EXCEPTION 'Missing execution mode'; END IF;
+ IF p_test_only AND (c.namespace<>'test' OR c.inference_approved) THEN RETURN jsonb_build_object('status','test_only_required'); END IF;
  IF NOT c.enabled THEN RETURN jsonb_build_object('status','disabled'); END IF;
  IF c.namespace='production' AND NOT c.inference_approved THEN RETURN jsonb_build_object('status','approval_required'); END IF;
  -- DB-level lease prevents overlap across Worker instances/redeployments.
@@ -57,7 +62,7 @@ BEGIN
  IF n>=c.daily_limit THEN RETURN jsonb_build_object('status','daily_limit'); END IF;
  slot:=date_trunc('minute',p_tick);
  INSERT INTO public.job_runs(job_name,scheduled_for,trigger_source,input_summary)
- VALUES('cogcor_pseudo_daemon_v1:'||c.namespace,slot,'cloudflare_cron',jsonb_build_object('test_only',c.namespace='test','max_events',1))
+ VALUES('cogcor_pseudo_daemon_v1:'||c.namespace,slot,CASE WHEN p_test_only THEN 'manual_test' ELSE 'cloudflare_cron' END,jsonb_build_object('test_only',c.namespace='test','max_events',1))
  ON CONFLICT DO NOTHING RETURNING id INTO r;
  IF r IS NULL THEN RETURN jsonb_build_object('status','duplicate_tick'); END IF;
  INSERT INTO cogcor_daemon_private.queue(namespace,moment_id)
@@ -72,6 +77,8 @@ BEGIN
   UPDATE public.job_runs SET status='skipped',finished_at=now(),output_summary='{"reason":"no_unprocessed_event"}' WHERE id=r;
   RETURN jsonb_build_object('status','no_unprocessed_event','run_id',r);
  END IF;
+ -- Manual authorization is consumed atomically; further requests cannot run another event.
+ IF p_test_only THEN UPDATE cogcor_daemon_private.control SET enabled=false WHERE id; END IF;
  UPDATE cogcor_daemon_private.queue SET status='running',attempts=attempts+1,run_id=r WHERE namespace=q.namespace AND moment_id=q.moment_id;
  IF c.namespace='test' THEN
   SELECT to_jsonb(mom)||jsonb_build_object('source_table','cogcor_daemon_test.moments') INTO m FROM cogcor_daemon_test.moments mom WHERE id=q.moment_id;
