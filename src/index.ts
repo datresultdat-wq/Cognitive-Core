@@ -1,3 +1,4 @@
+import { learningRpc } from './learning-contract';
 /**
  * CogCor — Cognitive Core MCP Server
  * Persistent memory, emotional state, identity, and drift detection for AI companions
@@ -1237,7 +1238,9 @@ export class CognitiveCore extends McpAgent<Env> {
           const start = Date.now();
           let success = true;
           try {
-            return await handler(...handlerArgs);
+            const result = await handler(...handlerArgs);
+            if (result?.isError) success = false;
+            return result;
           } catch (err) {
             success = false;
             throw err;
@@ -3242,143 +3245,27 @@ export class CognitiveCore extends McpAgent<Env> {
 
     this.server.tool(
       "match_skill",
-      "Find the best matching skill for a situation using semantic search. Call this before tackling something you might have handled before.",
-      {
-        situation: z.string().describe("Describe the current situation — what are you dealing with?"),
-        limit: z.number().default(3).describe("Max skills to return"),
-      },
-      async ({ situation, limit }) => {
-        const embedding = await generateEmbedding(situation, this.env.HF_API_TOKEN, this.env.AI);
-
-        if (!embedding) {
-          const supabase = createSupabaseClient(this.env);
-          const allSkills = await supabase.query('skills', {
-            select: '*',
-            order: 'effectiveness.desc',
-            limit: 20,
-            filter: { status: 'active' },
-          });
-          const skills = Array.isArray(allSkills) ? allSkills : [];
-
-          const words = situation.toLowerCase().split(/\s+/);
-          const scored = skills.map((s: any) => {
-            const skillText = `${s.skill_name} ${s.description} ${s.trigger_context || ''} ${(s.tags || []).join(' ')}`.toLowerCase();
-            const overlap = words.filter(w => w.length > 3 && skillText.includes(w)).length;
-            return { ...s, _match_score: overlap };
-          }).filter((s: any) => s._match_score > 0)
-            .sort((a: any, b: any) => b._match_score - a._match_score)
-            .slice(0, limit);
-
-          if (scored.length > 0) {
-            for (const s of scored) {
-              supabase.update(
-                'skills',
-                { last_used_at: new Date().toISOString(), times_used: (s.times_used || 0) + 1 },
-                { id: s.id },
-              ).catch((e: any) => console.warn(`match_skill usage update failed for ${s.id}: ${e?.message || e}`));
-            }
-          }
-
-          return {
-            content: [{ type: "text" as const, text: scored.length > 0
-              ? JSON.stringify(scored, null, 2)
-              : "No matching skills found. If you handle this well, consider storing it with store_skill." }]
-          };
-        }
-
-        const supabase = createSupabaseClient(this.env);
-        const allSkills = await supabase.query('skills', {
-          select: '*',
-          order: 'effectiveness.desc',
-          limit: 50,
-          filter: { status: 'active' },
-          includeRaw: true,
-        }) as any[];
-
-        if (!Array.isArray(allSkills) || allSkills.length === 0) {
-          return {
-            content: [{ type: "text" as const, text: "No skills stored yet. Handle the situation, and if it goes well, store the approach with store_skill." }]
-          };
-        }
-
-        // Compute similarity for skills that have embeddings
-        const scored = allSkills
-          .filter((s: any) => s.embedding)
-          .map((s: any) => {
-            const skillEmb = typeof s.embedding === 'string' ? JSON.parse(s.embedding) : s.embedding;
-            // Cosine similarity
-            let dotProduct = 0, normA = 0, normB = 0;
-            for (let i = 0; i < embedding.length; i++) {
-              dotProduct += embedding[i] * (skillEmb[i] || 0);
-              normA += embedding[i] * embedding[i];
-              normB += (skillEmb[i] || 0) * (skillEmb[i] || 0);
-            }
-            const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB) || 1);
-            const { embedding: _, ...rest } = s;
-            return { ...rest, _similarity: Math.round(similarity * 1000) / 1000 };
-          })
-          .filter((s: any) => s._similarity > 0.4)
-          .sort((a: any, b: any) => {
-            // Weighted: similarity * 0.6 + effectiveness * 0.4
-            const aScore = a._similarity * 0.6 + (a.effectiveness || 0.5) * 0.4;
-            const bScore = b._similarity * 0.6 + (b.effectiveness || 0.5) * 0.4;
-            return bScore - aScore;
-          })
-          .slice(0, limit);
-
-        if (scored.length > 0) {
-          for (const s of scored) {
-            supabase.update(
-                'skills',
-                { last_used_at: new Date().toISOString(), times_used: (s.times_used || 0) + 1 },
-                { id: s.id },
-              ).catch((e: any) => console.warn(`match_skill usage update failed for ${s.id}: ${e?.message || e}`));
-          }
-        }
-
-        return {
-          content: [{ type: "text" as const, text: scored.length > 0
-            ? JSON.stringify(scored, null, 2)
-            : "No matching skills found. If you handle this well, consider storing it with store_skill." }]
-        };
-      }
+      "For a previously corrected topic or continuing task, retrieve reviewed procedures and separate unreviewed hypotheses. Retrieval is not application. Do not call for every casual message; check source and applicability before using a procedure.",
+      { situation: z.string().min(2).max(300), limit: z.number().int().min(1).max(10).default(3) },
+      async ({ situation, limit }) => ({ content: [{ type: 'text' as const, text: JSON.stringify(await learningRpc(this.env, 'cogcor_learning_context_v1', { p_query: situation, p_limit: limit })) }] })
     );
-
+    this.server.tool(
+      "learning_application",
+      "Record an explicit procedure lifecycle: retrieved, selected, applied, outcome_observed. Use a stable application UUID and opaque conversation reference; never claim applied merely because retrieved. Outcome requires a later direct user statement or observed result event. Scoring and adoption require separate human review.",
+      { application_id: z.string().uuid(), skill_id: z.string().uuid(), conversation_ref: z.string().min(1).max(120), stage: z.enum(['retrieved','selected','applied','outcome_observed']), evidence: z.string().min(1).max(1000).optional(), observation_id: z.number().int().positive().optional() },
+      async a => ({ content: [{ type: 'text' as const, text: JSON.stringify(await learningRpc(this.env, 'cogcor_learning_application_v1', { p_id: a.application_id, p_skill: a.skill_id, p_conversation_ref: a.conversation_ref, p_stage: a.stage, p_evidence: a.evidence ?? null, p_observation: a.observation_id ?? null })) }] })
+    );
+    this.server.tool(
+      "learning_search",
+      "Retrieve source-bearing conversation memories for a correction or ongoing task. Japanese lexical matching, not proof of relevance. Check evidence_type and source_quote; summaries remain summaries. No inference or embedding call.",
+      { query: z.string().min(2).max(300), limit: z.number().int().min(1).max(20).default(5), person: z.string().max(100).optional(), after: z.string().datetime().optional(), before: z.string().datetime().optional(), origin: z.string().max(100).optional() },
+      async a => ({ content: [{ type: 'text' as const, text: JSON.stringify(await learningRpc(this.env, 'cogcor_learning_search_v1', { p_query: a.query, p_limit: a.limit, p_person: a.person ?? null, p_after: a.after ?? null, p_before: a.before ?? null, p_origin: a.origin ?? null })) }] })
+    );
     this.server.tool(
       "update_skill_outcome",
-      "Report whether a skill worked. Updates effectiveness score over time.",
-      {
-        skill_id: z.string().uuid().describe("UUID of the skill"),
-        was_successful: z.boolean().describe("Did the skill work?"),
-      },
-      async ({ skill_id, was_successful }, _extra?: unknown, fixture = false, fixtureEvent?: unknown) => {
-        const supabase = this.maintenanceClient(fixture);
-        const existing = await supabase.query('skills', { select: '*', filter: { id: skill_id }, limit: 1 });
-        const skills = Array.isArray(existing) ? existing : [];
-
-        if (skills.length === 0) {
-          return { content: [{ type: "text" as const, text: `Skill ${skill_id} not found.` }] };
-        }
-
-        const skill = skills[0];
-        const newUsed = (skill.times_used || 0) + 1;
-        const newSucceeded = (skill.times_succeeded || 0) + (was_successful ? 1 : 0);
-        const newFailed = (skill.times_failed || 0) + (was_successful ? 0 : 1);
-        const newEffectiveness = newUsed > 0 ? newSucceeded / newUsed : 0.5;
-
-        await supabase.update('skills', {
-          times_used: newUsed,
-          times_succeeded: newSucceeded,
-          times_failed: newFailed,
-          effectiveness: Math.round(newEffectiveness * 100) / 100,
-          updated_at: new Date().toISOString(),
-        }, { id: skill_id }, { requireMatch: true });
-
-        const emoji = was_successful ? '✓' : '✗';
-        return {
-          content: [{ type: "text" as const, text: `${emoji} Skill "${skill.skill_name}" updated: ${newSucceeded}/${newUsed} (${Math.round(newEffectiveness * 100)}% effective)` }]
-        };
-      }
+      "Deprecated: use a recorded application, later observed evidence, and human-reviewed scoring. A boolean alone cannot establish an outcome.",
+      { skill_id: z.string().uuid(), was_successful: z.boolean() },
+      async () => ({ isError: true, content: [{ type: 'text' as const, text: 'Observed application evidence and human-reviewed scoring required; no counters changed.' }] })
     );
 
     // === SOMATIC MEMORY LAYER ===
@@ -5001,7 +4888,7 @@ export class CognitiveCore extends McpAgent<Env> {
         if (!fixture && fixtureEvent) {
           return { content: [{ type: 'text' as const, text: JSON.stringify({
             conversation_experiences: [fixtureEvent],
-            observed_learning_outcomes: await fetchObservedOutcomes(this.env, hours_back || 24),
+            observed_learning_outcomes: await fetchObservedOutcomes(this.env, hours_back || 24, String((fixtureEvent as any).memory_content || '')) ,
             interpretation_boundary: 'Observed outcomes are evidence, not confirmed user facts or identity.'
           }) }] };
         }
@@ -5760,8 +5647,8 @@ export class CognitiveCore extends McpAgent<Env> {
         });
         if (grant?.status !== 'approved') {
           const stopped = ['invalid_tick','disarmed','misconfigured','busy_or_pending_approval',
-            'paused_after_failure','daily_limit','paused_candidate_backlog','no_eligible_new_event',
-            'paused_unfinished_reservation','paused_running_job'];
+            'budget_unapproved','call_budget','cost_budget','duplicate_tick','paused_running_job','paused_after_failure','daily_limit','paused_candidate_backlog','no_eligible_new_event',
+            'paused_unfinished_reservation'];
           if (!stopped.includes(grant?.status)) throw new Error('Invalid automatic reservation response');
           return;
         }
@@ -7260,23 +7147,7 @@ export class CognitiveCore extends McpAgent<Env> {
       }
 
       if (url.pathname === '/api/skill/outcome' && request.method === 'POST') {
-        const { skill_id, was_successful } = await readJson(request);
-        const existing = await supabase.query('skills', { select: '*', filter: { id: skill_id }, limit: 1 });
-        const skills = Array.isArray(existing) ? existing : [];
-        if (skills.length === 0) return jsonResponse({ error: 'Skill not found' }, 404);
-
-        const skill = skills[0];
-        const newUsed = (skill.times_used || 0) + 1;
-        const newSucceeded = (skill.times_succeeded || 0) + (was_successful ? 1 : 0);
-        const newFailed = (skill.times_failed || 0) + (was_successful ? 0 : 1);
-        const effectiveness = newUsed > 0 ? Math.round((newSucceeded / newUsed) * 100) / 100 : 0.5;
-
-        await supabase.update('skills', {
-          times_used: newUsed, times_succeeded: newSucceeded, times_failed: newFailed,
-          effectiveness, updated_at: new Date().toISOString(),
-        }, { id: skill_id }, { requireMatch: true });
-
-        return jsonResponse({ success: true, skill_name: skill.skill_name, effectiveness, times_used: newUsed });
+        return jsonResponse({ error: 'Observed application evidence and human-reviewed scoring required; no counters changed.' }, 409);
       }
 
       // === MCP ENDPOINTS ===
