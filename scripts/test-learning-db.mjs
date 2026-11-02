@@ -27,6 +27,7 @@ try {
  CREATE TABLE public.essence(content text,pinned boolean,source text);
  CREATE TABLE public.people(name text,content text,source text);`);
  await db.exec(read('supabase/migrations/20261102011543_continuous_learning_contract.sql'));
+ await db.exec(read('supabase/migrations/20261102043922_reviewed_rule_registration.sql'));
  await db.exec(read('test/fixtures/search-baseline.sql'));
  console.log('Local migration applied; no remote connections.');
 } catch(e) { console.error('LOCAL MIGRATION FAILED:',e.message,e.position,e.where);process.exitCode=1;await db.close();process.exit(1); }
@@ -47,7 +48,7 @@ const candidate=async()=>{
 };
 const adopt=async()=>{
  const c=await candidate(),review=await moment('user_direct','SYNTHETIC human approval of specified procedure','-10 minutes');
- const s=(await q(`SELECT public.cogcor_learning_review_v1($1,$2,'approved','領収書を確認するときのみ','根拠なしの番号回答を減らす','Compared every active skill; no conflict found in synthetic fixture','{}') AS r`,[c.p,review]))[0].r.skill_id;
+ const s=(await q(`SELECT public.cogcor_learning_review_v1($1,$2,'approved','領収書を確認するときのみ','根拠なしの番号回答を減らす','Compared every active skill; no conflict found in synthetic fixture',ARRAY(SELECT id FROM public.skills WHERE status='active')) AS r`,[c.p,review]))[0].r.skill_id;
  return {...c,s};
 };
 const transition=(id,s,stage,evidence=null,observation=null)=>q(`SELECT public.cogcor_learning_application_v1($1,$2,'synthetic-chat',$3,$4,$5) r`,[id,s,stage,evidence,observation]);
@@ -163,6 +164,12 @@ try {
   assert.equal(first.stored,true);assert.equal(second.stored,false);assert.equal(first.memory_source,second.memory_source);
   assert.equal((await q('SELECT source_quote FROM cogcor_chat_bridge.moments WHERE id=$1',[first.memory_source.split(':').at(-1)]))[0].source_quote,args[2]);
  });
+ await (await import('./test-reviewed-rule.mjs')).testReviewedRule({q,test,reject,moment,candidate,transition,uuid});
+ await test('v2 rollback stops registration while preserving revision and skill evidence',async()=>{
+  await db.exec(read('docs/reviewed-rule-registration/rollback.sql').replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,''));
+  assert.equal((await q("SELECT to_regprocedure('public.cogcor_learning_review_v2(uuid,bigint,text,jsonb,jsonb,text)') r"))[0].r,null);
+  assert.ok((await q("SELECT to_regclass('cogcor_learning_private.rule_revisions') r"))[0].r);
+ });
  await test('rollback restores original RPCs, retains data, and leaves operation disarmed',async()=>{
   const c=await adopt();await db.exec(read('docs/learning-cycle-20261031/rollback.sql').replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,''));
   assert.equal((await q('SELECT count(*)::int n FROM cogcor_learning_private.reviews WHERE candidate_id=$1',[c.p]))[0].n,1);
@@ -172,6 +179,8 @@ try {
  if(nativeSocket){
   const clients=await Promise.all(Array.from({length:8},async()=>{const c=new Client({host:nativeSocket,port:55439,user:'postgres',database:'postgres'});await c.connect();return c;}));
   try{
+   await (await import('./test-reviewed-rule.mjs')).testConcurrentRegistration({clients,q,moment,candidate});
+   count++;console.log('PASS NATIVE 8 connections: one revised registration, one skill and one history record');
    const c=await adopt();
    const ids=clients.map(()=>uuid());
    await Promise.all(clients.map(async(client,i)=>{
