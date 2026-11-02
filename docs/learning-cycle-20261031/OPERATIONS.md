@@ -14,7 +14,7 @@
 2. 新環境だけの最新Worker version/bundle、全設定（Secretは値を出さず名前とbinding）、DO ID、Cron、Git HEADを再取得。今回の保存済みbundleとSHAを照合する。本番が動いていれば改めて差分を取る。
 3. Supabaseの対象関数定義/ACL、テーブルDDL/制約/RLS/インデックス、control、queue、job_runs/job_stages、対象候補/skill/outcomeの復元可能なバックアップを作成し、保存権限と復元手順を確認する。今回の保存はコード・定義・メタデータ中心であり、全DBバックアップの代替ではない。Secretや本人の会話原文をGitへ入れない。
 4. 承認済みの保守操作で既存Cronとautoを停止し、実行中/予約中ジョブがないことを確認。失敗・期限切れなら、stage/queue/候補/費用予約を照合して状態を確定する。行を消して再実行可能にしない。
-5. `supabase/migrations/20261030225726_continuous_learning_contract.sql` を適用する。トランザクションと3秒ロック待ち、実行中/予約中ガードあり。新予算は未承認、autoはOFFで作成。既存RLS/Secret/Essenceは変更しない。
+5. `supabase/migrations/20261102011543_continuous_learning_contract.sql` を適用する。トランザクションと3秒ロック待ち、実行中/予約中ガードあり。新予算は未承認、autoはOFFで作成。既存RLS/Secret/Essenceは変更しない。
 6. SQL受け入れ確認後にWorkerを反映。DB前のWorker反映は禁止。DO binding、migration tag v1、Secret、既存Cronを差分照合。ローカルwranglerにはCronがないので、無確認のdeployで本番設定を上書きしない。Buildsの設定を事前に調整するか、承認した単一のデプロイ経路を使う。
 7. /health、未認証401、認証済みtools/list、読み取りRPC、合成データによる隔離テストを実施。認証値を出さない。本番本人データを検証の都合で書き換えない。
 8. 本番推論は別途、対象イベント/モデル/最大入力6000bytes/出力512tokens/呼出上限/期限/最大費用を示して承認。費用上限は料金表と最大トークンから保守的に算定し `cost_per_call_ceiling_usd` を設定する。これは予約上限であり請求実績ではない。料金改定時に再審査する。現時点の設定0は実行を許可しない。

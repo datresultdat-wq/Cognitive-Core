@@ -26,7 +26,7 @@ try {
  CREATE TABLE public.patterns(content text,description text,status text,source text);
  CREATE TABLE public.essence(content text,pinned boolean,source text);
  CREATE TABLE public.people(name text,content text,source text);`);
- await db.exec(read('supabase/migrations/20261030225726_continuous_learning_contract.sql'));
+ await db.exec(read('supabase/migrations/20261102011543_continuous_learning_contract.sql'));
  await db.exec(read('test/fixtures/search-baseline.sql'));
  console.log('Local migration applied; no remote connections.');
 } catch(e) { console.error('LOCAL MIGRATION FAILED:',e.message,e.position,e.where);process.exitCode=1;await db.close();process.exit(1); }

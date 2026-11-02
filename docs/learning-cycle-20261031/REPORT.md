@@ -36,7 +36,7 @@
 - `src/learning-contract.ts`: 対象project/RPC allowlist、秘密値を返さないHTTP失敗、10秒RPC期限、45秒AI待機上限。
 - `src/index.ts`: match_skillを審査済み手順の取得に接続、検索時加算/embedding呼出を廃止。learning_search/application追加。booleanのみのlegacy評価を拒否。isErrorを監査失敗として計上。汎用target_typeを拡張していない。
 - `src/pseudo-daemon.ts`: 対象主題に関連する観測評価だけを取得し、AI期限と固定エラーコード保存を追加。
-- `supabase/migrations/20261030225726_continuous_learning_contract.sql`: 呼出/費用予約、event冪等性、reserve/claimの共通予算、期限整合、失敗停止、監査、審査/適用/観測/評価、検索正規化とOR/類似候補、service-only RPC。既存RLS/Essence/本人記憶は変更しない。
+- `supabase/migrations/20261102011543_continuous_learning_contract.sql`: 呼出/費用予約、event冪等性、reserve/claimの共通予算、期限整合、失敗停止、監査、審査/適用/観測/評価、検索正規化とOR/類似候補、service-only RPC。既存RLS/Essence/本人記憶は変更しない。
 - `scripts/test-learning-db.mjs`、`scripts/test-learning-native.mjs`、`scripts/local-db/*`、`test/fixtures/*`: 隔離SQL試験。
 - `test/learning-contract.test.ts`、`test/native-cognitive-loop.test.ts`: MCP契約/認証失敗/timeout/誤加算拒否。
 - `.github/workflows/learning-check.yml`: 外部接続・本番Secretを使わないCI。GitHub上では未実行。
