@@ -27,3 +27,7 @@ new_sqlite_classes = ["CognitiveCore"]
 # - SUPABASE_URL
 # - SUPABASE_SERVICE_KEY
 # - HF_API_TOKEN
+
+# Existing production schedule; SQL auto_enabled is the execution gate.
+[triggers]
+crons = ["*/5 * * * *"]

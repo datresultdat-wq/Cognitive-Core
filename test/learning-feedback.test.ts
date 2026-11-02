@@ -90,12 +90,52 @@ describe('binding output parser',()=>{
  it.each([null,[],{}, {response:null},{response:[]},{response:'null'}, {response:'x'.repeat(16001)}])('rejects malformed envelopes and oversized text',value=>{
   expect(()=>parseBindingAnalysis(value)).toThrow(/^AI_OUTPUT_/);
  });
- it.each([{}, {...valid,candidate:' '},{...valid,reflection:'x'.repeat(1601)},{...valid,self_model_question:7},{...valid,candidate:null}])('rejects invalid required fields',response=>{
+ it.each([{}, {...valid,candidate:' '},{...valid,reflection:'x'.repeat(1601)},{...valid,self_model_question:7}])('rejects genuinely invalid fields',response=>{
   expect(()=>parseBindingAnalysis({response})).toThrow('AI_OUTPUT_FIELDS');
  });
  it('does not copy __proto__ or action keys',()=>{
   const response='{"reflection":"x","candidate":"y","self_model_question":"z","__proto__":{"polluted":true},"action":"promote"}';
   expect(parseBindingAnalysis({response}).analysis).toEqual(valid);
   expect(Object.hasOwn(Object.prototype,'polluted')).toBe(false);
+ });
+});
+
+
+describe('optional learning outputs',()=>{
+ it.each([
+  [{reflection:'r',candidate:'c',self_model_question:'q'},['store_reflection','metacognition'],true,[]],
+  [{reflection:'r'},['store_reflection'],false,['metacognition','candidate']],
+  [{reflection:'r',candidate:null,self_model_question:'q'},['store_reflection','metacognition'],false,['candidate']],
+  [{candidate:'c'},[],true,['reflection','metacognition']],
+  [{self_model_question:'q'},['metacognition'],false,['reflection','candidate']],
+  [{reflection:null,candidate:null,self_model_question:null},[],false,['reflection','metacognition','candidate']],
+ ])('only stores present outputs and records intentional omissions: %j',async (analysis,writes,hasCandidate,skips)=>{
+  const f=setup();f.env.AI.run.mockResolvedValue({response:JSON.stringify(analysis)});
+  expect(await runPseudoDaemon(f.env,Date.now(),f.invoke,false,approval)).toMatchObject({status:'completed'});
+  expect(f.native.map(c=>c.name).slice(2)).toEqual(writes);
+  const candidates=f.calls.filter(c=>c.name==='cogcor_daemon_candidate_v1');
+  expect(candidates).toHaveLength(hasCandidate?1:0);
+  if(hasCandidate)expect(candidates[0].args.p_question).toBe(analysis.self_model_question??null);
+  expect(f.calls.filter(c=>c.args.p_status==='skipped').map(c=>c.args.p_stage)).toEqual(skips);
+  expect(f.calls.find(c=>c.name==='cogcor_daemon_finish_v1')?.args.p_status).toBe('completed');
+  expect(f.native.some(c=>['remember','store_memory','store_skill'].includes(c.name))).toBe(false);
+  expect(f.env.AI.run).toHaveBeenCalledTimes(1);
+  if(writes.length===0&&!hasCandidate)expect(f.calls.find(c=>c.args.p_stage==='inference'&&c.args.p_status==='completed').args.p_receipt.learning_output).toBe('no_learning_needed');
+ });
+ it.each([
+  [{candidate:{secret:'PRIVATE_SENTINEL'}},'candidate','invalid_type'],
+  [{reflection:[]},'reflection','invalid_type'],
+  [{self_model_question:false},'self_model_question','invalid_type'],
+  [{candidate:'  '},'candidate','too_small'],
+  [{reflection:'PRIVATE_SENTINEL'.repeat(200)},'reflection','too_big'],
+  [{unexpected:'PRIVATE_SENTINEL'},'analysis','missing_fields'],
+ ])('records safe field names and codes without rejected content: %j',async (analysis,field,code)=>{
+  const f=setup();f.env.AI.run.mockResolvedValue({response:JSON.stringify(analysis)});
+  expect(await runPseudoDaemon(f.env,Date.now(),f.invoke,false,approval)).toMatchObject({status:'failed'});
+  const receipt=f.calls.find(c=>c.args.p_stage==='inference'&&c.args.p_status==='failed').args.p_receipt;
+  expect(receipt.field_errors).toEqual([{field,code}]);
+  expect(JSON.stringify(f.calls)).not.toContain('PRIVATE_SENTINEL');
+  expect(f.native.map(c=>c.name)).toEqual(['get_processing_context','self_model']);
+  expect(f.calls.some(c=>c.name==='cogcor_daemon_candidate_v1')).toBe(false);
  });
 });

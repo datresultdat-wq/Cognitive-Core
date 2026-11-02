@@ -28,6 +28,11 @@ try {
  CREATE TABLE public.people(name text,content text,source text);`);
  await db.exec(read('supabase/migrations/20261102011543_continuous_learning_contract.sql'));
  await db.exec(read('supabase/migrations/20261102043922_reviewed_rule_registration.sql'));
+ // Replay the exact historical production migration's explicit armed-state prerequisite locally only.
+ await db.exec(`UPDATE cogcor_daemon_private.control SET namespace='production',auto_enabled=true`);
+ await db.exec(read('supabase/migrations/20261102071515_cogcor_cumulative_usd3_unbounded_event_processing_20261102.sql'));
+ await db.exec(`UPDATE cogcor_daemon_private.control SET auto_enabled=false`);
+ await db.exec(read('supabase/migrations/20261102103142_optional_learning_outputs.sql'));
  await db.exec(read('test/fixtures/search-baseline.sql'));
  console.log('Local migration applied; no remote connections.');
 } catch(e) { console.error('LOCAL MIGRATION FAILED:',e.message,e.position,e.where);process.exitCode=1;await db.close();process.exit(1); }
@@ -54,7 +59,9 @@ const adopt=async()=>{
 const transition=(id,s,stage,evidence=null,observation=null)=>q(`SELECT public.cogcor_learning_application_v1($1,$2,'synthetic-chat',$3,$4,$5) r`,[id,s,stage,evidence,observation]);
 const uuid=()=>crypto.randomUUID();
 try {
- await test('defaults disarmed; expired/unapproved budget refuses work',async()=>{
+ await test('defaults disarmed; cumulative approval survives daily boundaries; zero cap refuses work',async()=>{
+  assert.equal((await q('SELECT public.cogcor_daemon_budget_status_v1() s'))[0].s,'ready');
+  await q('UPDATE cogcor_daemon_private.control SET total_cost_cap_usd=0');
   assert.equal((await q('SELECT public.cogcor_daemon_budget_status_v1() s'))[0].s,'budget_unapproved');
   assert.equal((await q('SELECT auto_enabled FROM cogcor_daemon_private.control'))[0].auto_enabled,false);
  });
@@ -92,7 +99,7 @@ try {
   assert.equal((await q(`SELECT has_function_privilege('service_role','public.cogcor_learning_review_v1(uuid,bigint,text,text,text,text,uuid[])','EXECUTE') p`))[0].p,false);
   assert.equal((await q(`SELECT has_function_privilege('anon','public.cogcor_learning_context_v1(text,integer)','EXECUTE') p`))[0].p,false);
  });
- await test('rolling call and cost budgets are enforced consistently before reserve and claim',async()=>{
+ await test('cumulative budget charges failed calls; legacy daily/hour limits do not replace the cap',async()=>{
   await q(`UPDATE cogcor_daemon_private.control SET auto_enabled=true,auto_started_at=now()-interval '2 hours',budget_approved_until=now()+interval '1 hour',max_calls_hour=2,max_calls_24h=3,cost_per_call_ceiling_usd=0.01,max_cost_usd_24h=0.02`);
   await moment();
   const reserve=(await q('SELECT public.cogcor_daemon_auto_reserve_v1(now()) r'))[0].r;assert.equal(reserve.status,'approved');
@@ -106,8 +113,8 @@ try {
   assert.equal((await q('SELECT status FROM cogcor_daemon_private.queue WHERE run_id=$1',[claim.run_id]))[0].status,'needs_review');
   assert.equal((await q('SELECT auto_enabled FROM cogcor_daemon_private.control'))[0].auto_enabled,false);
   await q(`UPDATE cogcor_daemon_private.control SET max_calls_hour=1`);
-  assert.equal((await q('SELECT public.cogcor_daemon_budget_status_v1() s'))[0].s,'call_budget');
-  await q(`UPDATE cogcor_daemon_private.control SET max_calls_hour=2,max_cost_usd_24h=0.01`);
+  assert.equal((await q('SELECT public.cogcor_daemon_budget_status_v1() s'))[0].s,'ready');
+  await q(`UPDATE cogcor_daemon_private.control SET max_calls_hour=2,max_cost_usd_24h=0.01,total_cost_cap_usd=0.01`);
   assert.equal((await q('SELECT public.cogcor_daemon_budget_status_v1() s'))[0].s,'cost_budget');
  });
  await test('reservation expiry and execution lease are distinct; expired work stops',async()=>{
@@ -117,12 +124,64 @@ try {
   assert.equal((await q("SELECT public.cogcor_daemon_auto_reserve_v1(now()+interval '1 minute') r"))[0].r.status,'paused_unfinished_reservation');
   assert.equal((await q('SELECT auto_enabled FROM cogcor_daemon_private.control'))[0].auto_enabled,false);
  });
- await test('backlog stops and summaries remain ineligible',async()=>{
+ await test('production backlog policy does not auto-adopt; summaries remain ineligible',async()=>{
   await q(`UPDATE cogcor_daemon_private.control SET auto_enabled=true,auto_started_at=now()-interval '2 hours',budget_approved_until=now()+interval '1 hour',max_calls_hour=12,max_calls_24h=12,cost_per_call_ceiling_usd=0.01,max_cost_usd_24h=1,pending_candidate_limit=1`);
   await moment('conversation_summary');
   assert.equal((await q('SELECT public.cogcor_daemon_auto_reserve_v1(now()) r'))[0].r.status,'no_eligible_new_event');
   await candidate();
-  assert.equal((await q("SELECT public.cogcor_daemon_auto_reserve_v1(now()+interval '1 minute') r"))[0].r.status,'paused_candidate_backlog');
+  assert.equal((await q("SELECT public.cogcor_daemon_auto_reserve_v1(now()+interval '1 minute') r"))[0].r.status,'approved');
+ });
+ await test('optional candidate question preserves provenance; null/empty content and duplicate inserts rejected',async()=>{
+  const m=await moment();const j=(await q(`INSERT INTO public.job_runs(job_name,status,started_at) VALUES('cogcor_pseudo_daemon_v1:production','running',now()) RETURNING id`))[0].id;
+  await q(`INSERT INTO cogcor_daemon_private.queue(namespace,moment_id,status,run_id,attempts) VALUES('production',$1,'running',$2,1)`,[m,j]);
+  for(const value of [null,'','   '])await reject('SELECT public.cogcor_daemon_candidate_v1($1,$2,NULL)',[j,value],/Candidate budget/);
+  await reject("SELECT public.cogcor_daemon_candidate_v1($1,'valid',' ')",[j],/Candidate budget/);
+  await q("SELECT public.cogcor_daemon_candidate_v1($1,'Synthetic actionable candidate',NULL)",[j]);
+  const p=(await q('SELECT proposed_content,rationale,source_records FROM public.cognitive_proposals WHERE job_run_id=$1',[j]))[0];
+  assert.equal(JSON.parse(p.rationale).self_model_question,null);assert.equal(p.source_records[0].id,String(m));
+  await reject("SELECT public.cogcor_daemon_candidate_v1($1,'Synthetic actionable candidate',NULL)",[j],/unique|duplicate/);
+  assert.equal((await q('SELECT count(*)::int n FROM public.cognitive_proposals WHERE job_run_id=$1',[j]))[0].n,1);
+ });
+ await test('memory-only completion has explicit skipped stages, no proposal and cannot reprocess event',async()=>{
+  await q(`UPDATE cogcor_daemon_private.control SET auto_enabled=true,auto_started_at=now()-interval '2 hours'`);
+  const m=await moment();const reserve=(await q('SELECT public.cogcor_daemon_auto_reserve_v1(now()) r'))[0].r;
+  const run=(await q('SELECT public.cogcor_daemon_claim_v1(now(),false,$1) r',[reserve.approval_id]))[0].r;
+  await q("SELECT public.cogcor_daemon_stage_v1($1,'inference','completed',$2)",[run.run_id,JSON.stringify({validation:'accepted',generated_fields:[]})]);
+  for(const stage of ['reflection','metacognition','candidate'])await q("SELECT public.cogcor_daemon_stage_v1($1,$2,'skipped',$3)",[run.run_id,stage,JSON.stringify({reason:"not_needed"})]);
+  await q("SELECT public.cogcor_daemon_finish_v1($1,'completed',NULL,false)",[run.run_id]);
+  assert.equal((await q('SELECT output_summary FROM public.job_runs WHERE id=$1',[run.run_id]))[0].output_summary.learning_output,'no_learning_needed');
+  assert.equal((await q('SELECT count(*)::int n FROM public.cognitive_proposals'))[0].n,0);
+  assert.equal((await q('SELECT count(*)::int n FROM cogcor_chat_bridge.moments WHERE id=$1',[m]))[0].n,1);
+  await q('SELECT public.cogcor_daemon_auto_finalize_v1($1,true)',[reserve.approval_id]);
+  assert.equal((await q("SELECT public.cogcor_daemon_auto_reserve_v1(now()+interval '1 minute') r"))[0].r.status,'no_eligible_new_event');
+ });
+ for(const mode of ['candidate','reflection','mismatch']) await test('finalizer validates optional generated outputs: '+mode,async()=>{
+  await q(`UPDATE cogcor_daemon_private.control SET auto_enabled=true,auto_started_at=now()-interval '2 hours'`);await moment();
+  const reserve=(await q('SELECT public.cogcor_daemon_auto_reserve_v1(now()) r'))[0].r;
+  const run=(await q('SELECT public.cogcor_daemon_claim_v1(now(),false,$1) r',[reserve.approval_id]))[0].r;
+  await q("SELECT public.cogcor_daemon_stage_v1($1,'inference','completed',$2)",[run.run_id,JSON.stringify({validation:'accepted',generated_fields:[mode==='reflection'?'reflection':'candidate']})]);
+  for(const stage of ['reflection','metacognition','candidate']){
+   if(stage==='candidate'&&mode==='candidate')await q("SELECT public.cogcor_daemon_candidate_v1($1,'Synthetic procedure',NULL)",[run.run_id]);
+   else await q('SELECT public.cogcor_daemon_stage_v1($1,$2,$3,$4)',[run.run_id,stage,mode==='reflection'&&stage==='reflection'?'completed':'skipped',JSON.stringify({reason:'not_needed'})]);
+  }
+  await q("SELECT public.cogcor_daemon_finish_v1($1,'completed',NULL,false)",[run.run_id]);
+  assert.equal((await q('SELECT public.cogcor_daemon_auto_finalize_v1($1,true) r',[reserve.approval_id]))[0].r.status,mode==='mismatch'?'disarmed':'completed');
+  assert.equal((await q('SELECT auto_enabled FROM cogcor_daemon_private.control'))[0].auto_enabled,mode!=='mismatch');
+ });
+ await test('optional-output rollback restores RPCs while retaining cumulative budget and existing evidence',async()=>{
+  await db.exec(read('docs/optional-learning/rollback.sql').replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,''));
+  assert.equal(Number((await q('SELECT total_cost_cap_usd FROM cogcor_daemon_private.control'))[0].total_cost_cap_usd),3);
+  assert.equal((await q('SELECT auto_enabled FROM cogcor_daemon_private.control'))[0].auto_enabled,false);
+  assert.ok(!(await q("SELECT pg_get_functiondef('public.cogcor_daemon_auto_finalize_v1(uuid,boolean)'::regprocedure) d"))[0].d.includes('generated_fields'));
+ });
+ await test('lifetime budget includes old and failed jobs; legacy daily cap does not block next eligible event',async()=>{
+  await q(`INSERT INTO public.job_runs(job_name,status,started_at,finished_at) VALUES('cogcor_pseudo_daemon_v1:production','failed',now()-interval '2 days',now()-interval '2 days')`);
+  await q(`UPDATE cogcor_daemon_private.control SET total_cost_cap_usd=0.001`);
+  assert.equal((await q('SELECT public.cogcor_daemon_budget_status_v1() s'))[0].s,'cost_budget');
+  await q(`UPDATE cogcor_daemon_private.control SET total_cost_cap_usd=3,auto_enabled=true,auto_started_at=now()-interval '2 hours',daily_limit=1,max_calls_hour=1,max_calls_24h=1`);
+  await q(`INSERT INTO public.job_runs(job_name,status,started_at,finished_at) VALUES('cogcor_pseudo_daemon_v1:production','completed',now()-interval '20 minutes',now()-interval '19 minutes')`);
+  await moment();const reserve=(await q('SELECT public.cogcor_daemon_auto_reserve_v1(now()) r'))[0].r;
+  assert.equal(reserve.status,'approved');assert.equal((await q('SELECT public.cogcor_daemon_claim_v1(now(),false,$1) r',[reserve.approval_id]))[0].r.status,'claimed');
  });
  await test('held candidate later approved retains its linked skill',async()=>{
   const c=await candidate(),review=await moment('user_direct','SYNTHETIC human hold then review','-5 minutes');
