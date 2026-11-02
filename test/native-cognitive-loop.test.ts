@@ -33,7 +33,7 @@ describe('native cognitive lifecycle plumbing (isolated fixture)',()=>{
   const two=new CognitiveCore({} as any,env as any);await two.init();
   const recalled=await call(two,'recall_skills',{tag:'isolated_fixture',limit:10});
   const skills=JSON.parse(recalled.content[0].text);expect(JSON.parse(skills[0].approach).guidance).toBe('fixture-code-83726');
-  await call(two,'update_skill_outcome',{skill_id:skills[0].id,was_successful:true});
+  expect((await call(two,'update_skill_outcome',{skill_id:skills[0].id,was_successful:true})).isError).toBe(true);
   const pref=db.get('companion_preferences')![0];
   await call(two,'self_model',{action:'confirm',id:pref.id,evidence:'Fixture evaluator observed the retrieved code used; not an insert receipt.'});
   expect(pref.confidence).toBeCloseTo(0.4);
@@ -42,7 +42,7 @@ describe('native cognitive lifecycle plumbing (isolated fixture)',()=>{
   await call(two,'self_model',{action:'revise',id:pref.id,preference:'Also inspect the current fixture correction.',evidence:'Fixture failure, not a real user outcome'});
   expect(pref.times_confirmed).toBe(1);expect(pref.times_revised).toBe(1);expect(pref.confidence).toBeCloseTo(0.3);
   expect(pref.graduated).not.toBe(true);
-  expect(db.get('skills')![0]).toMatchObject({times_succeeded:1,times_failed:1});
+  expect(db.get('skills')![0]).toMatchObject({times_used:0,times_succeeded:0,times_failed:0});
   expect(db.get('reflections')).toHaveLength(1);expect(db.get('metacognition_log')).toHaveLength(1);expect(db.get('outcome_scores')).toHaveLength(1);
   expect(called).toContain('recall_skills');expect(called).toContain('self_model');
  });

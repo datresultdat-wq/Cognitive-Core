@@ -1,3 +1,4 @@
+import { boundedInference } from './learning-contract';
 /** Bounded execution host for existing CogCor tools, not a new learning engine. */
 import { z } from 'zod';
 
@@ -38,8 +39,8 @@ export const ObservedOutcome = z.object({
   candidate: z.string().min(1).max(450), score: z.union([z.literal(1),z.literal(-1)]),
   evidence_ref: z.string().regex(/^cogcor_chat_bridge:moments:[1-9][0-9]*$/),
 }).strict();
-export async function fetchObservedOutcomes(env: Environment, hours = 24) {
-  const rows = await daemonRpc(env, 'cogcor_daemon_outcomes_v1', {p_hours:Math.max(1,Math.min(72,Math.trunc(hours)||24)),p_limit:3});
+export async function fetchObservedOutcomes(env: Environment, hours = 24, query?: string) {
+  const rows = await daemonRpc(env, query === undefined ? 'cogcor_daemon_outcomes_v1' : 'cogcor_daemon_related_outcomes_v1', {...(query === undefined ? {} : {p_query:query.slice(0,300)}),p_hours:Math.max(1,Math.min(72,Math.trunc(hours)||24)),p_limit:3});
   return z.array(ObservedOutcome).max(3).parse(rows);
 }
 
@@ -132,11 +133,11 @@ export async function runPseudoDaemon(env: Environment, scheduledTime: number, i
       try {
         let output: unknown;
         try {
-          output = await env.AI.run(MODEL, { messages: [{ role: 'system', content: system }, { role: 'user', content: evidence }], max_tokens: 512, temperature: 0 });
-        } catch { throw new Error('AI_BINDING_FAILED'); }
+          output = await boundedInference(() => env.AI!.run(MODEL, { messages: [{ role: 'system', content: system }, { role: 'user', content: evidence }], max_tokens: 512, temperature: 0 }));
+        } catch (e) { throw new Error(e instanceof Error && e.message === 'AI_TIMEOUT' ? 'AI_TIMEOUT' : 'AI_BINDING_FAILED'); }
         parsed = parseBindingAnalysis(output);
       } catch (error) {
-        const reason = error instanceof Error && /^AI_(OUTPUT_[A-Z_]+|BINDING_FAILED)$/.test(error.message) ? error.message : 'AI_OUTPUT_INVALID';
+        const reason = error instanceof Error && /^AI_(OUTPUT_[A-Z_]+|BINDING_FAILED|TIMEOUT)$/.test(error.message) ? error.message : 'AI_OUTPUT_INVALID';
         await daemonRpc(env, 'cogcor_daemon_stage_v1', { p_run: runId, p_stage: 'inference', p_status: 'failed', p_receipt: { ...receipt, validation: 'rejected', reason } });
         throw new Error(reason);
       }
@@ -156,7 +157,7 @@ export async function runPseudoDaemon(env: Environment, scheduledTime: number, i
     return { status: 'completed', run_id: runId, test_only: fixture, native_tools: completed };
   } catch (error) {
     // Unknown write outcome is never retried blindly. No source text/error body in logs.
-    await daemonRpc(env, 'cogcor_daemon_finish_v1', { p_run: runId, p_status: 'failed', p_error: error instanceof Error ? error.message.slice(0,150) : 'Run failed', p_retry_safe: fixture && !nativeWriteStarted });
+    await daemonRpc(env, 'cogcor_daemon_finish_v1', { p_run: runId, p_status: 'failed', p_error: error instanceof Error && /^AI_(OUTPUT_[A-Z_]+|BINDING_FAILED|TIMEOUT)$/.test(error.message) ? error.message : 'EXECUTION_FAILED', p_retry_safe: fixture && !nativeWriteStarted });
     return { status: 'failed', run_id: runId, needs_review: nativeWriteStarted };
   }
 }

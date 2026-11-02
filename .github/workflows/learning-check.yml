@@ -1,0 +1,21 @@
+name: Learning contract checks
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  local-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm ci --prefix scripts/local-db --ignore-scripts
+      - run: node scripts/test-learning-db.mjs
+      - run: git diff --exit-code -- package-lock.json scripts/local-db/package-lock.json
