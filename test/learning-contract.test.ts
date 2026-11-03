@@ -30,7 +30,7 @@ describe('explicit learning boundary',()=>{
   const AI={run:vi.fn()};const agent:any=new CognitiveCore({} as any,{...env,AI} as any);await agent.init();
   const result=await agent.server.tools.get('match_skill')({situation:'領収書',limit:3});
   expect(JSON.parse(result.content[0].text).retrieval_is_application).toBe(false);
-  expect(fetch.mock.calls.filter(c=>!String(c[0]).endsWith('/usage_logs'))).toHaveLength(1);expect(String(fetch.mock.calls[0][0])).toContain('cogcor_learning_context_v1');expect(AI.run).not.toHaveBeenCalled();
+  expect(fetch.mock.calls.filter(c=>!String(c[0]).endsWith('/usage_logs'))).toHaveLength(1);expect(String(fetch.mock.calls[0][0])).toContain('cogcor_learning_provisional_context_v1');expect(AI.run).not.toHaveBeenCalled();
   const denied=await agent.server.tools.get('update_skill_outcome')({skill_id:crypto.randomUUID(),was_successful:true});expect(denied.isError).toBe(true);expect(fetch.mock.calls.filter(c=>!String(c[0]).endsWith('/usage_logs'))).toHaveLength(1);
  });
  it('forwards explicit application identity and observed event through the sole RPC',async()=>{
@@ -38,5 +38,22 @@ describe('explicit learning boundary',()=>{
   const agent:any=new CognitiveCore({} as any,env as any);await agent.init();const id=crypto.randomUUID(),skill=crypto.randomUUID();
   await agent.server.tools.get('learning_application')({application_id:id,skill_id:skill,conversation_ref:'opaque-chat',stage:'outcome_observed',observation_id:17});
   expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({p_id:id,p_skill:skill,p_stage:'outcome_observed',p_observation:17});
+ });
+});
+
+
+describe('continuous experience and provisional tools',()=>{
+ it('exposes capture, correction and provisional application without inference or formal promotion',async()=>{
+  const fetch=vi.fn().mockImplementation(async()=>Response.json({ok:true}));vi.stubGlobal('fetch',fetch);
+  const AI={run:vi.fn()},agent:any=new CognitiveCore({} as any,{...env,AI} as any);await agent.init();
+  await agent.server.tools.get('capture_experience')({conversation_ref:'chat',message_ref:'message',occurred_at:'2026-11-03T00:00:00Z',kind:'user_fact',content:'Synthetic fact',quote:'Synthetic fact',evidence_type:'user_direct',context_type:'real'});
+  const id=crypto.randomUUID(),candidate=crypto.randomUUID();
+  await agent.server.tools.get('provisional_application')({application_id:id,candidate_id:candidate,conversation_ref:'chat',stage:'retrieved'});
+  await agent.server.tools.get('correct_provisional_learning')({candidate_id:candidate,correction_event_id:42});
+  const calls=fetch.mock.calls.filter(c=>!String(c[0]).endsWith('/usage_logs'));
+  expect(calls.map(c=>String(c[0]).split('/').at(-1))).toEqual(['cogcor_learning_capture_v1','cogcor_learning_provisional_apply_v1','cogcor_learning_correct_v1']);
+  expect(JSON.parse(calls[0][1].body)).toMatchObject({p_evidence:'user_direct',p_context:'real',p_message:'message'});
+  expect(JSON.parse(calls[1][1].body)).toMatchObject({p_stage:'retrieved',p_candidate:candidate});
+  expect(AI.run).not.toHaveBeenCalled();
  });
 });

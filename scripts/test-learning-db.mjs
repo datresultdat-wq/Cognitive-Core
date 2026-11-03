@@ -33,6 +33,7 @@ try {
  await db.exec(read('supabase/migrations/20261102071515_cogcor_cumulative_usd3_unbounded_event_processing_20261102.sql'));
  await db.exec(`UPDATE cogcor_daemon_private.control SET auto_enabled=false`);
  await db.exec(read('supabase/migrations/20261102103142_optional_learning_outputs.sql'));
+ await db.exec(read('supabase/migrations/20261103025354_all_learning_mode.sql'));
  await db.exec(read('test/fixtures/search-baseline.sql'));
  console.log('Local migration applied; no remote connections.');
 } catch(e) { console.error('LOCAL MIGRATION FAILED:',e.message,e.position,e.where);process.exitCode=1;await db.close();process.exit(1); }
@@ -124,12 +125,11 @@ try {
   assert.equal((await q("SELECT public.cogcor_daemon_auto_reserve_v1(now()+interval '1 minute') r"))[0].r.status,'paused_unfinished_reservation');
   assert.equal((await q('SELECT auto_enabled FROM cogcor_daemon_private.control'))[0].auto_enabled,false);
  });
- await test('production backlog policy does not auto-adopt; summaries remain ineligible',async()=>{
+ await test('production backlog policy does not auto-adopt; summaries remain labeled and eligible',async()=>{
   await q(`UPDATE cogcor_daemon_private.control SET auto_enabled=true,auto_started_at=now()-interval '2 hours',budget_approved_until=now()+interval '1 hour',max_calls_hour=12,max_calls_24h=12,cost_per_call_ceiling_usd=0.01,max_cost_usd_24h=1,pending_candidate_limit=1`);
   await moment('conversation_summary');
-  assert.equal((await q('SELECT public.cogcor_daemon_auto_reserve_v1(now()) r'))[0].r.status,'no_eligible_new_event');
-  await candidate();
-  assert.equal((await q("SELECT public.cogcor_daemon_auto_reserve_v1(now()+interval '1 minute') r"))[0].r.status,'approved');
+  assert.equal((await q('SELECT public.cogcor_daemon_auto_reserve_v1(now()) r'))[0].r.status,'approved');
+  assert.equal((await q('SELECT count(*)::int n FROM public.skills'))[0].n,0);
  });
  await test('optional candidate question preserves provenance; null/empty content and duplicate inserts rejected',async()=>{
   const m=await moment();const j=(await q(`INSERT INTO public.job_runs(job_name,status,started_at) VALUES('cogcor_pseudo_daemon_v1:production','running',now()) RETURNING id`))[0].id;
@@ -223,7 +223,15 @@ try {
   assert.equal(first.stored,true);assert.equal(second.stored,false);assert.equal(first.memory_source,second.memory_source);
   assert.equal((await q('SELECT source_quote FROM cogcor_chat_bridge.moments WHERE id=$1',[first.memory_source.split(':').at(-1)]))[0].source_quote,args[2]);
  });
+ await (await import('./test-all-learning.mjs')).testAllLearning({q,test,reject,moment,candidate,uuid});
  await (await import('./test-reviewed-rule.mjs')).testReviewedRule({q,test,reject,moment,candidate,transition,uuid});
+ await test('all-learning rollback preserves captures and budget while disarming new paths',async()=>{
+  await db.exec(read('docs/all-learning/rollback.sql').replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,''));
+  assert.equal((await q('SELECT auto_enabled FROM cogcor_daemon_private.control'))[0].auto_enabled,false);
+  assert.equal(Number((await q('SELECT total_cost_cap_usd FROM cogcor_daemon_private.control'))[0].total_cost_cap_usd),3);
+  assert.ok((await q("SELECT to_regclass('cogcor_learning_private.capture_receipts') r"))[0].r);
+  assert.equal((await q("SELECT has_function_privilege('service_role','public.cogcor_learning_provisional_context_v1(text,integer)','EXECUTE') p"))[0].p,false);
+ });
  await test('v2 rollback stops registration while preserving revision and skill evidence',async()=>{
   await db.exec(read('docs/reviewed-rule-registration/rollback.sql').replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,''));
   assert.equal((await q("SELECT to_regprocedure('public.cogcor_learning_review_v2(uuid,bigint,text,jsonb,jsonb,text)') r"))[0].r,null);
@@ -238,6 +246,10 @@ try {
  if(nativeSocket){
   const clients=await Promise.all(Array.from({length:8},async()=>{const c=new Client({host:nativeSocket,port:55439,user:'postgres',database:'postgres'});await c.connect();return c;}));
   try{
+   const captureStamp=new Date().toISOString();
+   const captures=await Promise.all(clients.map(client=>client.query("SELECT public.cogcor_learning_capture_v1('native-capture','one-message',$1,'user_fact','SYNTHETIC concurrent fact','SYNTHETIC concurrent fact','user_direct','real') r",[captureStamp])));
+   assert.equal(new Set(captures.map(x=>x.rows[0].r.moment_id)).size,1);
+   count++;console.log('PASS NATIVE 8 connections: concurrent capture creates one memory and one receipt');
    await (await import('./test-reviewed-rule.mjs')).testConcurrentRegistration({clients,q,moment,candidate});
    count++;console.log('PASS NATIVE 8 connections: one revised registration, one skill and one history record');
    const c=await adopt();
