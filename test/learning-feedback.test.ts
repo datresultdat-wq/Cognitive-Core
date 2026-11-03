@@ -139,3 +139,14 @@ describe('optional learning outputs',()=>{
   expect(f.calls.some(c=>c.name==='cogcor_daemon_candidate_v1')).toBe(false);
  });
 });
+
+
+describe('active learning input budget',()=>{
+ it('processes a long Japanese user fact once with bounded labeled input instead of rejecting its category',async()=>{
+  const f=setup([], '観測'.repeat(800));f.env.AI.run.mockResolvedValue({response:JSON.stringify({reflection:'Evidence remains provisional',candidate:'Verify the observation before applying',self_model_question:null})});
+  expect(await runPseudoDaemon(f.env,Date.now(),f.invoke,false,approval)).toMatchObject({status:'completed'});
+  const input=f.env.AI.run.mock.calls[0][1];expect(input.messages[0].content).toContain('First identify a useful understanding');
+  expect(new TextEncoder().encode(input.messages.map((m:any)=>m.content).join('')).length).toBeLessThanOrEqual(6000);
+  expect(JSON.parse(input.messages[1].content).truncated).toBe(true);expect(f.env.AI.run).toHaveBeenCalledTimes(1);
+ });
+});

@@ -1,6 +1,6 @@
 /** Explicit, service-only learning contract. No approval/scoring RPC exposed to the model. */
 type Env = { SUPABASE_URL: string; SUPABASE_SERVICE_KEY: string };
-const allowed = new Set(['cogcor_learning_context_v1', 'cogcor_learning_application_v1', 'cogcor_learning_search_v1']);
+const allowed = new Set(['cogcor_learning_context_v1', 'cogcor_learning_application_v1', 'cogcor_learning_search_v1', 'cogcor_learning_capture_v1', 'cogcor_learning_provisional_context_v1', 'cogcor_learning_provisional_apply_v1', 'cogcor_learning_correct_v1']);
 export async function learningRpc(env: Env, name: string, args: Record<string, unknown>) {
   if (!allowed.has(name)) throw new Error('Unsupported learning RPC');
   const url = new URL(env.SUPABASE_URL);

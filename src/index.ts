@@ -3245,10 +3245,25 @@ export class CognitiveCore extends McpAgent<Env> {
 
     this.server.tool(
       "match_skill",
-      "For a previously corrected topic or continuing task, retrieve reviewed procedures and separate unreviewed hypotheses. Retrieval is not application. Do not call for every casual message; check source and applicability before using a procedure.",
+      "For a previously corrected topic or continuing task, retrieve reviewed procedures, relevant memories and usable provisional hypotheses. Current user corrections take priority. Provisional output is not a confirmed fact or a formal skill. Retrieval is not application. Do not call for every casual message; check source and applicability before using a procedure.",
       { situation: z.string().min(2).max(300), limit: z.number().int().min(1).max(10).default(3) },
-      async ({ situation, limit }) => ({ content: [{ type: 'text' as const, text: JSON.stringify(await learningRpc(this.env, 'cogcor_learning_context_v1', { p_query: situation, p_limit: limit })) }] })
+      async ({ situation, limit }) => ({ content: [{ type: 'text' as const, text: JSON.stringify(await learningRpc(this.env, 'cogcor_learning_provisional_context_v1', { p_query: situation, p_limit: limit })) }] })
     );
+    this.server.tool(
+      "capture_experience",
+      "Use when the authorized user shares an important experience, personal fact, correction or reasoning method. Save only accessible content through existing remember, with stable conversation/message references, original timestamp and evidence class. This tool cannot read unseen chats. Distinguish fiction/hypotheses; replay identical messages without duplicate storage.",
+      { conversation_ref:z.string().min(1).max(200),message_ref:z.string().min(1).max(200),occurred_at:z.string().datetime().nullable(),kind:z.enum(['conversation_event','user_fact','assistant_reflection','learned_rule','open_thread']),content:z.string().min(1).max(1600),quote:z.string().max(800).nullable(),evidence_type:z.enum(['user_direct','observed_result','assistant_interpretation','conversation_summary']),context_type:z.enum(['real','hypothetical','fiction']).default('real') },
+      async a=>({content:[{type:'text' as const,text:JSON.stringify(await learningRpc(this.env,'cogcor_learning_capture_v1',{p_conversation:a.conversation_ref,p_message:a.message_ref,p_occurred_at:a.occurred_at,p_kind:a.kind,p_content:a.content,p_quote:a.quote,p_evidence:a.evidence_type,p_context:a.context_type}))}]}));
+    this.server.tool(
+      "provisional_application",
+      "Record use of a sourced provisional candidate without promoting it to a formal skill or fact. Record retrieved, then selected with applicability, then applied with the actual response reference. A later user observation is separate; never fabricate outcome or usage merely from search. Human/operator evaluation follows observed evidence.",
+      {application_id:z.string().uuid(),candidate_id:z.string().uuid(),conversation_ref:z.string().min(1).max(200),stage:z.enum(['retrieved','selected','applied','outcome_observed']),evidence:z.string().min(1).max(1000).optional(),observation_id:z.number().int().positive().optional()},
+      async a=>({content:[{type:'text' as const,text:JSON.stringify(await learningRpc(this.env,'cogcor_learning_provisional_apply_v1',{p_id:a.application_id,p_candidate:a.candidate_id,p_conversation:a.conversation_ref,p_stage:a.stage,p_evidence:a.evidence??null,p_observation:a.observation_id??null}))}]}));
+    this.server.tool(
+      "correct_provisional_learning",
+      "When the user explicitly corrects a specific previous hypothesis, link the newly saved direct correction event and hold the old candidate. Preserve its source/history; subsequent recall prioritizes the correction. Do not infer a correction or alter Essence.",
+      {candidate_id:z.string().uuid(),correction_event_id:z.number().int().positive()},
+      async a=>({content:[{type:'text' as const,text:JSON.stringify(await learningRpc(this.env,'cogcor_learning_correct_v1',{p_candidate:a.candidate_id,p_event:a.correction_event_id}))}]}));
     this.server.tool(
       "learning_application",
       "Record an explicit procedure lifecycle: retrieved, selected, applied, outcome_observed. Use a stable application UUID and opaque conversation reference; never claim applied merely because retrieved. Outcome requires a later direct user statement or observed result event. Scoring and adoption require separate human review.",
